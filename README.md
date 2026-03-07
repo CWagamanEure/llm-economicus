@@ -46,6 +46,17 @@
 }
 ```
 
+- For **market tasks**, we extend with:
+
+```json
+{
+  "valuation": ...,
+  "price_target": ...,
+  "order_type": "...",
+  "quantity": ...
+}
+```
+
 5 main buckets:
 
 1. **Risk / loss / time choice tasks**
