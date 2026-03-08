@@ -28,6 +28,19 @@
 - **Benchmark C**: Economic strategic rationality
 - **Benchmark D**: Financial Rationality (properly identifying and acting on positive EV) 
 
+## Generate Mock Data
+
+Run from repo root:
+
+```bash
+poetry run python main.py --count 100 --seed 42 --output data/mock_risk_loss_time.jsonl
+```
+
+Useful options:
+
+- `--prompt-style` one of `default`, `formal`, `plain_english`, `compact`, `finance_framed`, `unlabeled`, `random`
+- `--version` metadata version tag (default `v1`)
+
 ## Training Data
 
 - General Structure:
@@ -38,13 +51,24 @@
   "state": {...},
   "beliefs": {...},
   "actions": [...],
+  "comparison_pair": {"left_action": "...", "right_action": "..."},
   "outcome_model": {...},
-  "expected_utilities": {...},
+  "action_values": {...},
   "constraints": {...},
   "optimal_decision": "...",
   "rationale": "brief formal explanation"
 }
 ```
+
+`action_values` stores comparable action values under the task's normative model.
+In risk/loss tasks these are expected utilities; in time-discounting tasks these are discounted present values.
+
+- Reproducibility metadata:
+  - Each generated sample includes `metadata.seed` and `metadata.version`.
+  - `metadata.seed` is the generator initialization seed (shared across samples in one run), not a per-example seed.
+  - `metadata.sample_index` identifies the sample order within that seeded run.
+  - `problem_spec.assumptions.tie_epsilon` records the tie-threshold used for decision comparisons.
+  - Prompt rendering supports multiple styles (`default`, `formal`, `plain_english`, `compact`, `finance_framed`) via `RiskLossTimeGenerator(prompt_style=...)`; `prompt_style="random"` samples a style deterministically from the generator RNG.
 
 - For **market tasks**, we extend with:
 
@@ -146,5 +170,3 @@
 - more deterministic
 - over optimizes in one benchmark
 - less context-sensitive 
-
-
