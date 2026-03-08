@@ -44,3 +44,30 @@ def test_run_rejects_non_positive_count():
         assert exc.code == 2
     else:
         raise AssertionError("Expected argparse to reject --count=0")
+
+
+def test_run_supports_bayesian_signal_generator(tmp_path: Path):
+    output_path = tmp_path / "bayesian.jsonl"
+
+    exit_code = main.run(
+        [
+            "--generator",
+            "bayesian_signal",
+            "--count",
+            "3",
+            "--seed",
+            "17",
+            "--prompt-style",
+            "default",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    rows = output_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(rows) == 3
+    first_row = json.loads(rows[0])
+    assert first_row["metadata"]["generator_name"] == "BayesianSignalGenerator"
+    assert first_row["metadata"]["seed"] == 17
+    assert first_row["metadata"]["sample_index"] == 0
