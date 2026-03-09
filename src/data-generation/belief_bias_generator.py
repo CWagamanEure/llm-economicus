@@ -320,26 +320,10 @@ class BeliefBiasGenerator(BaseGenerator):
         frame_variant: PromptFrameVariant,
         task_subtype: TaskSubtype,
     ) -> str:
-        if task_subtype != "base_rate_neglect":
-            # Subtype renderers handle substantive framing directly for
-            # conjunction/gambler/sample-size/overprecision.
-            return prompt
-        lead_by_variant = {
-            "medical_screening": (
-                "Interpret high as condition-present and low as condition-absent."
-            ),
-            "fraud_detection": ("Interpret high as fraudulent and low as legitimate."),
-            "hiring_screen": ("Interpret high as strong-fit and low as weak-fit."),
-            "security_alert": ("Interpret high as active threat and low as no threat."),
-            "trading_signal": (
-                "Interpret high as favorable market regime and low as unfavorable regime."
-            ),
-            "neutral_statistical": ("Interpret this as a generic noisy classification decision."),
-        }
-        lead = lead_by_variant.get(frame_variant, "")
-        if not lead:
-            return prompt
-        return f"{lead} {prompt}"
+        _ = frame_variant, task_subtype
+        # Subtype renderers own frame semantics directly; avoid wrapper-style
+        # prefix injection that can create frame/body mismatches.
+        return prompt
 
     def generate(self) -> DataPoint:
         current_index = self.sample_index
@@ -439,12 +423,35 @@ class BeliefBiasGenerator(BaseGenerator):
                 "which can create option ambiguity."
             )
         if not has_left and {left_action, right_action} == {"choose_a", "choose_b"}:
-            has_option_a = "option a" in lower_prompt or "a='" in lower_prompt
-            has_option_b = "option b" in lower_prompt or "b='" in lower_prompt
-            if not (has_option_a and has_option_b):
+            if not self._prompt_has_ab_option_markers(prompt=prompt):
                 raise ValueError(
                     "Prompt must clearly distinguish both options for choose_A/choose_B tasks."
                 )
+
+    def _prompt_has_ab_option_markers(self, *, prompt: str) -> bool:
+        # Require evidence of both A and B alternatives. Keep patterns strict enough
+        # to avoid accidental matches from stray letters.
+        marker_pairs: tuple[tuple[str, str], ...] = (
+            # Generic option labels.
+            (r"\boption\s+a\b", r"\boption\s+b\b"),
+            # A='...' / B='...' and A=... / B=...
+            (r"\ba\s*=\s*['\"]?", r"\bb\s*=\s*['\"]?"),
+            # A (...) / B (...)
+            (r"\ba\s*\(", r"\bb\s*\("),
+            # Frame-native named alternatives.
+            (r"\bfund\s+a\b", r"\bfund\s+b\b"),
+            (r"\bhospital\s+a\b", r"\bhospital\s+b\b"),
+            (r"\bline\s+a\b", r"\bline\s+b\b"),
+            (r"\binterval\s+a\b", r"\binterval\s+b\b"),
+            (r"\brange\s+a\b", r"\brange\s+b\b"),
+            (r"\bteam\s+a\b", r"\bteam\s+b\b"),
+            (r"\banalyst\s+a\b", r"\banalyst\s+b\b"),
+        )
+        return any(
+            re.search(pattern_a, prompt, flags=re.IGNORECASE)
+            and re.search(pattern_b, prompt, flags=re.IGNORECASE)
+            for pattern_a, pattern_b in marker_pairs
+        )
 
     def _validate_conjunction_option_structure(
         self,
@@ -1773,6 +1780,166 @@ class BeliefBiasGenerator(BaseGenerator):
     # Style goal: present screening judgments as realistic decisions. Non-formal
     # variants intentionally use behaviorally tempting framing; reserve explicit
     # method instruction (e.g., Bayes rule) for formal style.
+    def _base_rate_neglect_context_labels(
+        self, *, frame_variant: PromptFrameVariant
+    ) -> dict[str, str]:
+        labels_by_frame: dict[PromptFrameVariant, dict[str, str]] = {
+            "medical_screening": {
+                "state_high": "the condition is present",
+                "state_low": "the condition is absent",
+                "prior_text": "the condition-present prevalence",
+                "signal_name": "the screening test",
+                "observed_high": "the screening test came back positive",
+                "observed_low": "the screening test came back negative",
+            },
+            "fraud_detection": {
+                "state_high": "the payment is fraudulent",
+                "state_low": "the payment is legitimate",
+                "prior_text": "the prior fraud rate",
+                "signal_name": "the fraud alert",
+                "observed_high": "the payment was flagged by the fraud system",
+                "observed_low": "the payment was not flagged by the fraud system",
+            },
+            "hiring_screen": {
+                "state_high": "the candidate is a strong fit",
+                "state_low": "the candidate is not a strong fit",
+                "prior_text": "the strong-fit base rate",
+                "signal_name": "the automated screen result",
+                "observed_high": "the candidate received a strong automated screen result",
+                "observed_low": "the candidate received a weak automated screen result",
+            },
+            "security_alert": {
+                "state_high": "there is an active threat",
+                "state_low": "there is no active threat",
+                "prior_text": "the active-threat base rate",
+                "signal_name": "the monitoring alert",
+                "observed_high": "the monitoring system triggered an alert",
+                "observed_low": "the monitoring system did not trigger an alert",
+            },
+            "trading_signal": {
+                "state_high": "the market is in a favorable regime",
+                "state_low": "the market is in an unfavorable regime",
+                "prior_text": "the favorable-regime base rate",
+                "signal_name": "the model signal",
+                "observed_high": "the model flashed a bullish signal",
+                "observed_low": "the model flashed a bearish signal",
+            },
+            "neutral_statistical": {
+                "state_high": "class high is true",
+                "state_low": "class low is true",
+                "prior_text": "the prior probability of class high",
+                "signal_name": "the classifier signal",
+                "observed_high": "the observed signal is high",
+                "observed_low": "the observed signal is low",
+            },
+        }
+        return labels_by_frame.get(frame_variant, labels_by_frame["neutral_statistical"])
+
+    def _base_rate_neglect_question(
+        self,
+        *,
+        frame_variant: PromptFrameVariant,
+        tier: str,
+    ) -> str:
+        questions_by_tier = {
+            "formal": {
+                "medical_screening": (
+                    "Determine whether the condition is more likely present or absent."
+                ),
+                "fraud_detection": (
+                    "Determine whether the payment is more likely fraudulent or legitimate."
+                ),
+                "hiring_screen": (
+                    "Determine whether the candidate is more likely a strong fit or not."
+                ),
+                "security_alert": (
+                    "Determine whether an active threat is more likely present or absent."
+                ),
+                "trading_signal": (
+                    "Determine whether the market is more likely in a favorable or "
+                    "unfavorable regime."
+                ),
+                "neutral_statistical": (
+                    "Determine whether class high or class low is now more probable."
+                ),
+            },
+            "neutral_natural": {
+                "medical_screening": "Which is more likely here: condition present or absent?",
+                "fraud_detection": (
+                    "Which is more likely for this payment: fraudulent or legitimate?"
+                ),
+                "hiring_screen": (
+                    "Which is more likely for this candidate: strong fit or not a strong fit?"
+                ),
+                "security_alert": "Which is more likely now: active threat or no active threat?",
+                "trading_signal": (
+                    "Which market regime is more likely now: favorable or unfavorable?"
+                ),
+                "neutral_statistical": "Which is more likely: class high or class low?",
+            },
+            "naturalistic": {
+                "medical_screening": (
+                    "At first read, does this look more like condition present or absent?"
+                ),
+                "fraud_detection": (
+                    "At first read, does this payment look more fraudulent or legitimate?"
+                ),
+                "hiring_screen": (
+                    "At first read, does this candidate look more like a strong fit or not?"
+                ),
+                "security_alert": (
+                    "At first read, does this look more like an active threat or no threat?"
+                ),
+                "trading_signal": (
+                    "At first read, does this point more to a favorable regime "
+                    "or an unfavorable one?"
+                ),
+                "neutral_statistical": (
+                    "At first read, does this point more to class high or class low?"
+                ),
+            },
+        }
+        tier_questions = questions_by_tier.get(tier, questions_by_tier["neutral_natural"])
+        return tier_questions.get(frame_variant, tier_questions["neutral_statistical"])
+
+    def _base_rate_neglect_prompt_context(
+        self,
+        *,
+        assumptions: dict[str, object],
+        frame_variant: PromptFrameVariant,
+    ) -> dict[str, object]:
+        labels = self._base_rate_neglect_context_labels(frame_variant=frame_variant)
+        prior_high = assumptions["prior_high"]
+        p_pos_given_high = assumptions["p_signal_high_given_high"]
+        p_pos_given_low = assumptions["p_signal_high_given_low"]
+        observed_signal = assumptions["observed_signal"]
+        if observed_signal == "high":
+            observed_cue_label = "positive"
+            p_obs_given_high = p_pos_given_high
+            p_obs_given_low = p_pos_given_low
+            observed_sentence = labels["observed_high"]
+        else:
+            observed_cue_label = "negative"
+            p_obs_given_high = 1 - p_pos_given_high
+            p_obs_given_low = 1 - p_pos_given_low
+            observed_sentence = labels["observed_low"]
+        return {
+            "labels": labels,
+            "prior_high": prior_high,
+            "prior_text": self._format_number(prior_high),
+            "raw_high": p_pos_given_high,
+            "raw_low": p_pos_given_low,
+            "raw_high_text": self._format_number(p_pos_given_high),
+            "raw_low_text": self._format_number(p_pos_given_low),
+            "observed_signal": observed_signal,
+            "observed_cue_label": observed_cue_label,
+            "observed_high": p_obs_given_high,
+            "observed_low": p_obs_given_low,
+            "observed_high_text": self._format_number(p_obs_given_high),
+            "observed_low_text": self._format_number(p_obs_given_low),
+            "observed_sentence": observed_sentence,
+        }
+
     def _render_base_rate_neglect_prompt(
         self,
         *,
@@ -1781,46 +1948,46 @@ class BeliefBiasGenerator(BaseGenerator):
         prompt_style_regime: PromptStyleRegime | None = None,
         prompt_frame_variant: PromptFrameVariant | None = None,
     ) -> str:
-        _ = prompt_frame_variant
-        assumptions = problem_spec["assumptions"]
-        prior_high = assumptions["prior_high"]
-        p_pos_given_high = assumptions["p_signal_high_given_high"]
-        p_pos_given_low = assumptions["p_signal_high_given_low"]
-        observed_signal = assumptions["observed_signal"]
-        test_result = "positive" if observed_signal == "high" else "negative"
+        frame_variant = prompt_frame_variant or "neutral_statistical"
+        context = self._base_rate_neglect_prompt_context(
+            assumptions=problem_spec["assumptions"],
+            frame_variant=frame_variant,
+        )
+        labels = context["labels"]
         resolved_regime = (
             self._resolve_prompt_style_regime()
             if prompt_style_regime is None
             else prompt_style_regime
         )
         tier = self._prompt_style_tier(style, resolved_regime)
+        question = self._base_rate_neglect_question(frame_variant=frame_variant, tier=tier)
         if tier == "formal":
             body = (
-                "A screening model has base rate P(class_high)="
-                f"{self._format_number(prior_high)}. "
-                "Signal reliability is P(positive|class_high)="
-                f"{self._format_number(p_pos_given_high)} and P(positive|class_low)="
-                f"{self._format_number(p_pos_given_low)}. "
-                f"The observed result is {test_result}. "
-                "Given those rates and this result, which class now seems more likely?"
+                f"For this decision setting, {labels['prior_text']} is "
+                f"{context['prior_text']}. "
+                f"{labels['signal_name']} is positive with probability "
+                f"{context['raw_high_text']} when {labels['state_high']} and "
+                f"{context['raw_low_text']} when {labels['state_low']}. "
+                f"{str(context['observed_sentence']).capitalize()}. {question}"
             )
         elif tier == "neutral_natural":
             body = (
-                "A screening team reviews cases where only a fraction are truly high-risk: "
-                f"{self._format_number(prior_high)}. "
-                "The alert appears with chance "
-                f"{self._format_number(p_pos_given_high)} for high-risk and "
-                f"{self._format_number(p_pos_given_low)} for low-risk. "
-                f"This case came back {test_result}. Which class is more likely?"
+                f"{str(context['observed_sentence']).capitalize()}. "
+                f"{labels['prior_text'].capitalize()} is {context['prior_text']}. "
+                f"A {context['observed_cue_label']} result appears with probability "
+                f"{context['observed_high_text']} when {labels['state_high']} and "
+                f"{context['observed_low_text']} when {labels['state_low']}. "
+                f"{question}"
             )
         else:
             body = (
-                "A credit screen has default base rate "
-                f"{self._format_number(prior_high)}. "
-                "It flags true defaulters with probability "
-                f"{self._format_number(p_pos_given_high)} and flags non-defaulters "
-                f"with probability {self._format_number(p_pos_given_low)}. "
-                f"This applicant was flagged {test_result}. Which borrower state is more likely?"
+                f"{str(context['observed_sentence']).capitalize()}. At first pass, this can "
+                "look decisive. "
+                f"{labels['prior_text'].capitalize()} is {context['prior_text']}, and a "
+                f"{context['observed_cue_label']} result appears with probability "
+                f"{context['observed_high_text']} when {labels['state_high']} and "
+                f"{context['observed_low_text']} when {labels['state_low']}. "
+                f"{question}"
             )
 
         if style == "unlabeled":
@@ -2358,6 +2525,63 @@ class BeliefBiasGenerator(BaseGenerator):
             f"{leadin} {queried_term} is not more likely than {opposite_term} on the very next flip"
         )
 
+    def _gambler_assumption_clause(self, *, frame_variant: str, tier: str) -> str:
+        if tier == "formal":
+            clauses = {
+                "sports_streak": (
+                    "Assume each shot remains 50/50 and independent of earlier shots."
+                ),
+                "roulette_streak": (
+                    "Assume a fair wheel: red/black remains 50/50 and each spin is "
+                    "independent of prior spins."
+                ),
+                "market_streak": (
+                    "Assume unchanged 50/50 up/down odds and independence across sessions."
+                ),
+                "neutral_coin": (
+                    "Assume a fair coin with unchanged 50/50 odds and independent flips."
+                ),
+            }
+        elif tier == "neutral_natural":
+            clauses = {
+                "sports_streak": (
+                    "For this drill, make/miss stays 50/50 on the next shot, and each "
+                    "attempt is independent of the streak."
+                ),
+                "roulette_streak": (
+                    "Treat this as a fair wheel: red/black stays 50/50, and each spin is "
+                    "independent of the earlier run."
+                ),
+                "market_streak": (
+                    "In this toy setup, up/down odds stay 50/50 each session, and sessions "
+                    "are independent of prior moves."
+                ),
+                "neutral_coin": (
+                    "Treat this as a fair coin: heads/tails stays 50/50, and each flip is "
+                    "independent of earlier flips."
+                ),
+            }
+        else:
+            clauses = {
+                "sports_streak": (
+                    "Even with the crowd watching, the next shot is still 50/50 make/miss "
+                    "and independent of the run so far."
+                ),
+                "roulette_streak": (
+                    "Even with the table locked on the streak, the wheel stays fair at 50/50 "
+                    "red/black, with each spin independent."
+                ),
+                "market_streak": (
+                    "Even with desk attention on the run, this toy tape still uses 50/50 "
+                    "up/down odds with sessions independent of the streak."
+                ),
+                "neutral_coin": (
+                    "Even when the run feels loud, it is still a fair 50/50 coin with "
+                    "independent flips."
+                ),
+            }
+        return clauses.get(frame_variant, clauses["neutral_coin"])
+
     def _render_gambler_fallacy_prompt(
         self,
         *,
@@ -2433,100 +2657,115 @@ class BeliefBiasGenerator(BaseGenerator):
             frame_variant=frame_variant,
             phrase_style_idx=claim_phrase_style_idx,
         )
+        assumption_clause = self._gambler_assumption_clause(
+            frame_variant=frame_variant,
+            tier=tier,
+        )
         if tier == "formal":
             if frame_variant == "sports_streak":
                 body = (
                     f"In a shooting drill, the recent make/miss sequence is {streak} "
-                    "(H=make, T=miss). Assume each shot remains 50/50 and independent of "
-                    "earlier shots. Evaluate the two claims and select the correct one "
-                    "for the very next attempt."
+                    f"(H=make, T=miss). {assumption_clause} Evaluate the two claims and "
+                    "select the correct one for the very next attempt."
                 )
             elif frame_variant == "roulette_streak":
                 body = (
-                    f"Roulette wheel history shows {streak} (H=red, T=black). Assume each "
-                    "spin remains 50/50 and independent of prior spins. Which claim about "
-                    "the next spin is normatively correct?"
+                    f"Roulette wheel history shows {streak} (H=red, T=black). "
+                    f"{assumption_clause} Which claim about the next spin is normatively "
+                    "correct?"
                 )
             elif frame_variant == "market_streak":
                 body = (
                     f"A toy market log shows {streak} (H=up session, T=down session). "
-                    "Assume unchanged 50/50 odds and independence across sessions. Which "
-                    "claim is correct for the next session under those assumptions?"
+                    f"{assumption_clause} Which claim is correct for the next session under "
+                    "those assumptions?"
                 )
             else:
                 body = (
                     f"A fair process produced this streak: {streak}. "
-                    "Assume unchanged 50/50 odds and trial independence. "
+                    f"{assumption_clause} "
                     "Determine which claim is correct about the very next outcome."
                 )
         elif tier == "neutral_natural":
             if frame_variant == "roulette_streak":
-                body = f"{neutral_context} Which statement is better about the next spin?"
+                body = (
+                    f"{neutral_context} {assumption_clause} Which statement is better about "
+                    "the next spin?"
+                )
             elif frame_variant == "sports_streak":
-                body = f"{neutral_context} For the very next attempt, which statement is right?"
+                body = (
+                    f"{neutral_context} {assumption_clause} For the very next attempt, "
+                    "which statement is right?"
+                )
             elif frame_variant == "market_streak":
-                body = f"{neutral_context} For the next session, which statement is right?"
+                body = (
+                    f"{neutral_context} {assumption_clause} For the next session, which "
+                    "statement is right?"
+                )
             else:
-                body = f"{neutral_context} Which statement is right about the next outcome?"
+                body = (
+                    f"{neutral_context} {assumption_clause} Which statement is right about "
+                    "the next outcome?"
+                )
         else:
             if frame_variant == "roulette_streak":
                 templates = [
                     (
                         f"{bias_context} A lot of eyes are on the wheel now. "
-                        "What is your first call on the next spin?"
+                        f"{assumption_clause} What is your first call on the next spin?"
                     ),
                     (
                         f"{bias_context} Chips are already down and the run is hard to ignore. "
-                        "Which claim do you lean toward right now?"
+                        f"{assumption_clause} Which claim do you lean toward right now?"
                     ),
                     (
                         f"{bias_context} The board keeps flashing the streak as bets lock in. "
-                        "Which claim feels more convincing at a glance?"
+                        f"{assumption_clause} Which claim feels more convincing at a glance?"
                     ),
                 ]
             elif frame_variant == "sports_streak":
                 templates = [
                     (
                         f"{bias_context} The crowd is locked on the run before the next release. "
-                        "What is your first read?"
+                        f"{assumption_clause} What is your first read?"
                     ),
                     (
                         f"{bias_context} Teammates are already saying the streak is due to flip. "
-                        "Which claim do you reach for first?"
+                        f"{assumption_clause} Which claim do you reach for first?"
                     ),
                     (
                         f"{bias_context} The run is all anyone is talking about at the line. "
-                        "Which claim feels likelier right now?"
+                        f"{assumption_clause} Which claim feels likelier right now?"
                     ),
                 ]
             elif frame_variant == "market_streak":
                 templates = [
                     (
                         f"{bias_context} The streak is dominating desk chatter into the close. "
-                        "What is your first take for the next print?"
+                        f"{assumption_clause} What is your first take for the next print?"
                     ),
                     (
                         f"{bias_context} Screens keep replaying the run as positions are set. "
-                        "Which claim do you lean toward?"
+                        f"{assumption_clause} Which claim do you lean toward?"
                     ),
                     (
                         f"{bias_context} Attention is fixed on whether the streak finally breaks. "
-                        "Which claim feels more plausible right now?"
+                        f"{assumption_clause} Which claim feels more plausible right now?"
                     ),
                 ]
             else:
                 templates = [
                     (
                         f"{bias_context} The run stands out and people expect a turn. "
-                        "Which claim feels more plausible right now?"
+                        f"{assumption_clause} Which claim feels more plausible right now?"
                     ),
                     (
                         f"{bias_context} The streak is hard to unsee as the next flip approaches. "
-                        "What is your first read?"
+                        f"{assumption_clause} What is your first read?"
                     ),
                     (
                         f"{bias_context} The sequence is the only thing people are focused on. "
-                        "Which claim do you lean toward right away?"
+                        f"{assumption_clause} Which claim do you lean toward right away?"
                     ),
                 ]
             template_idx = self._select_template_variant(
@@ -3607,6 +3846,396 @@ class BeliefBiasGenerator(BaseGenerator):
         opener = opening_options[bucket]
         return opener.format(body=body)
 
+    def _validate_base_rate_neglect_prompt_completeness(
+        self,
+        *,
+        prompt: str,
+        problem_spec: BaseRateNeglectProblemSpec,
+        frame_variant: PromptFrameVariant,
+    ) -> list[dict[str, str]]:
+        failures: list[dict[str, str]] = []
+        lower = prompt.lower()
+        context = self._base_rate_neglect_prompt_context(
+            assumptions=problem_spec["assumptions"],
+            frame_variant=frame_variant,
+        )
+        labels = context["labels"]
+        prior_text = str(context["prior_text"])
+        raw_high_text = str(context["raw_high_text"])
+        raw_low_text = str(context["raw_low_text"])
+        observed_signal = str(context["observed_signal"])
+        observed_high_text = str(context["observed_high_text"])
+        observed_low_text = str(context["observed_low_text"])
+        observed_sentence = str(context["observed_sentence"]).lower()
+
+        if prior_text not in prompt:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_base_rate_prior",
+                    detail=(
+                        "base_rate_neglect prompt must include the prior/base rate value "
+                        f"'{prior_text}'."
+                    ),
+                )
+            )
+        if observed_sentence not in lower:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_base_rate_observed_cue",
+                    detail=(
+                        "base_rate_neglect prompt must include the observed cue/result wording "
+                        "for the selected frame."
+                    ),
+                )
+            )
+
+        state_high = labels["state_high"].lower()
+        state_low = labels["state_low"].lower()
+        if state_high not in lower or state_low not in lower:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_base_rate_state_anchors",
+                    detail=(
+                        "base_rate_neglect prompt must anchor cue rates to both high and low "
+                        "states/classes."
+                    ),
+                )
+            )
+
+        uses_explicit_positive_parameterization = (
+            self._base_rate_prompt_uses_explicit_positive_parameterization(
+                prompt=prompt,
+                raw_high_text=raw_high_text,
+                raw_low_text=raw_low_text,
+                state_high=state_high,
+                state_low=state_low,
+            )
+        )
+        has_raw_pair = self._base_rate_prompt_has_state_mapped_cue_pair(
+            prompt=prompt,
+            high_value_text=raw_high_text,
+            low_value_text=raw_low_text,
+            state_high_text=state_high,
+            state_low_text=state_low,
+        )
+        has_observed_pair = self._base_rate_prompt_has_state_mapped_cue_pair(
+            prompt=prompt,
+            high_value_text=observed_high_text,
+            low_value_text=observed_low_text,
+            state_high_text=state_high,
+            state_low_text=state_low,
+        )
+        if not (has_raw_pair or has_observed_pair):
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_base_rate_cue_rate_pair",
+                    detail=(
+                        "base_rate_neglect prompt must include both cue likelihood values "
+                        "(explicit parameterization or observed-cue rates)."
+                    ),
+                )
+            )
+
+        uses_observed_cue_natural_wording = (
+            self._base_rate_prompt_uses_observed_cue_natural_wording(prompt=prompt)
+        )
+        if observed_signal == "low" and uses_observed_cue_natural_wording:
+            # Natural observed-result wording ("negative result appears ...") must
+            # provide the observed-cue complement mapping (high->complement, low->complement).
+            if not has_observed_pair:
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_missing_observed_cue_pair",
+                        detail=(
+                            "Low-observed-cue natural-language wording must include the "
+                            "observed-cue likelihood pair (complements)."
+                        ),
+                    )
+                )
+
+            # If natural low-result prose also maps the raw positive-cue pair to states,
+            # this is semantically wrong for the observed cue and should be rejected.
+            if has_raw_pair and not uses_explicit_positive_parameterization:
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_low_cue_uses_raw_rates",
+                        detail=(
+                            "Low-observed-cue natural-language wording uses raw positive-cue "
+                            "rates instead of observed-cue complements."
+                        ),
+                    )
+                )
+
+            # Mixed prompts are only acceptable if natural observed-result wording also
+            # includes the correctly mapped observed-cue pair.
+            if (
+                has_raw_pair
+                and uses_explicit_positive_parameterization
+                and not has_observed_pair
+            ):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_ambiguous_parameterization_mix",
+                        detail=(
+                            "Prompt mixes explicit parameterization with natural-language "
+                            "observed-cue wording but omits observed-cue likelihood pair."
+                        ),
+                    )
+                )
+        return failures
+
+    def _base_rate_prompt_uses_explicit_positive_parameterization(
+        self,
+        *,
+        prompt: str,
+        raw_high_text: str,
+        raw_low_text: str,
+        state_high: str,
+        state_low: str,
+    ) -> bool:
+        """Detect explicit model-parameter wording for positive-cue likelihoods.
+
+        This covers formal conditional notation (e.g., P(positive|state)=...)
+        and explicit prose forms like "positive with probability x when ...".
+        """
+        lower = prompt.lower()
+        if self._base_rate_has_explicit_positive_conditional_notation(prompt=prompt):
+            return True
+        raw_high_pat = self._exact_numeric_token_pattern(raw_high_text)
+        raw_low_pat = self._exact_numeric_token_pattern(raw_low_text)
+        return bool(
+            re.search(
+                rf"positive\s+with\s+probability\s+{raw_high_pat}[^\n]{{0,80}}"
+                rf"when\s+{re.escape(state_high)}[^\n]{{0,80}}"
+                rf"{raw_low_pat}[^\n]{{0,80}}when\s+{re.escape(state_low)}",
+                lower,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _base_rate_has_explicit_positive_conditional_notation(self, *, prompt: str) -> bool:
+        lower = prompt.lower()
+        return bool(
+            re.search(r"p\s*\(\s*positive\s*\|", lower)
+            or re.search(r"p\s*\(\s*signal\s*=\s*high\s*\|", lower)
+        )
+
+    def _exact_numeric_token_pattern(self, number_text: str) -> str:
+        # Match the exact numeric token while preventing substring matches
+        # like 0.2 inside 0.25 or 10.2.
+        if "." in number_text:
+            trimmed = number_text.rstrip("0").rstrip(".")
+            if "." in trimmed:
+                return rf"(?<!\d){re.escape(trimmed)}(?:0+)?(?!\d)"
+        return rf"(?<!\d){re.escape(number_text)}(?!\d)"
+
+    def _base_rate_prompt_uses_observed_cue_natural_wording(self, *, prompt: str) -> bool:
+        """Detect natural-language wording about the observed cue/result itself.
+
+        This intentionally excludes formal positive-parameterization forms
+        (e.g., P(positive|...) or "is positive with probability ... when ...").
+        """
+        lower = prompt.lower()
+        # This detector is intentionally narrow:
+        # - Match natural observed-result phrasing ("this result", "a negative result", etc.)
+        # - Do NOT match explicit model-parameterization wording
+        #   ("P(positive|...)", "signal is positive with probability ... when ...").
+        return any(
+            re.search(pattern, lower) for pattern in self._base_rate_observed_cue_natural_patterns()
+        )
+
+    def _base_rate_observed_cue_natural_patterns(self) -> tuple[str, ...]:
+        return (
+            r"\ba\s+(?:positive|negative)\s+(?:result|signal)\s+appears\s+with\s+probability\b",
+            r"\bthis\s+(?:result|signal)\s+(?:appears|shows\s+up|is\s+seen)\s+with\s+probability\b",
+            r"\ba\s+result\s+like\s+this\s+(?:appears|shows\s+up|is\s+seen)\s+with\s+probability\b",
+            r"\bthe\s+chance\s+of\s+this\s+(?:result|signal)\s+is\b",
+            r"\bthe\s+chance\s+of\s+a\s+(?:positive|negative)\s+(?:result|signal)\s+is\b",
+        )
+
+    def _base_rate_value_attached_to_state(
+        self,
+        *,
+        prompt: str,
+        value_text: str,
+        state_text: str,
+    ) -> bool:
+        """Return True when a cue-rate value is locally mapped to the given state text."""
+        lower = prompt.lower()
+        state_pat = re.escape(state_text.lower())
+        value_pat = self._exact_numeric_token_pattern(value_text)
+        clause_connector_pat = r"(?:when|if|among|under)\b"
+        # Keep attachment local to one cue-mapping clause: do not cross another
+        # connector, another numeric token, or punctuation separators.
+        clause_barrier_pat = (
+            r"(?:\b(?:when|if|among|under)\b|"
+            r"(?<!\d)\d+(?:\.\d+)?(?!\d)|[,.;:?!])"
+        )
+        local_clause_gap = rf"(?:(?!{clause_barrier_pat}).){{0,80}}"
+        patterns = self._base_rate_state_value_mapping_patterns(
+            state_pat=state_pat,
+            value_pat=value_pat,
+            connector_pat=clause_connector_pat,
+            local_gap=local_clause_gap,
+        )
+        return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in patterns)
+
+    def _base_rate_state_value_mapping_patterns(
+        self,
+        *,
+        state_pat: str,
+        value_pat: str,
+        connector_pat: str,
+        local_gap: str,
+    ) -> tuple[str, ...]:
+        return (
+            # Explicit conditional notation.
+            rf"p\s*\(\s*positive\s*\|\s*{state_pat}\s*\)\s*[:=]\s*{value_pat}",
+            rf"p\s*\(\s*signal\s*=\s*high\s*\|\s*{state_pat}\s*\)\s*[:=]\s*{value_pat}",
+            # value ... when/if/among/under ... state (same local clause)
+            rf"{value_pat}{local_gap}{connector_pat}{local_gap}{state_pat}",
+            # when/if/among/under ... state ... value (same local clause)
+            rf"{connector_pat}{local_gap}{state_pat}{local_gap}{value_pat}",
+            # state ... when/if/among/under ... value (same local clause)
+            rf"{state_pat}{local_gap}{connector_pat}{local_gap}{value_pat}",
+        )
+
+    def _base_rate_prompt_has_state_mapped_cue_pair(
+        self,
+        *,
+        prompt: str,
+        high_value_text: str,
+        low_value_text: str,
+        state_high_text: str,
+        state_low_text: str,
+    ) -> bool:
+        """Require both cue-rate values to map to their intended state labels."""
+        return self._base_rate_value_attached_to_state(
+            prompt=prompt,
+            value_text=high_value_text,
+            state_text=state_high_text,
+        ) and self._base_rate_value_attached_to_state(
+            prompt=prompt,
+            value_text=low_value_text,
+            state_text=state_low_text,
+        )
+
+    def _validate_sample_size_neglect_prompt_completeness(
+        self,
+        *,
+        prompt: str,
+        problem_spec: SampleSizeNeglectProblemSpec,
+        frame_variant: PromptFrameVariant,
+    ) -> list[dict[str, str]]:
+        failures: list[dict[str, str]] = []
+        lower = prompt.lower()
+        option_a = problem_spec["options"]["A"]
+        option_b = problem_spec["options"]["B"]
+        baseline_text = self._format_number(option_a["baseline_rate"])
+        threshold_text = self._format_number(option_a["extreme_threshold"])
+        sample_a_text = str(option_a["sample_size"])
+        sample_b_text = str(option_b["sample_size"])
+        direction = option_a["extreme_direction"]
+
+        if baseline_text not in prompt:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_baseline_rate",
+                    detail=(
+                        "sample_size_neglect prompt must include the baseline rate value "
+                        f"'{baseline_text}'."
+                    ),
+                )
+            )
+        if threshold_text not in prompt:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_threshold",
+                    detail=(
+                        "sample_size_neglect prompt must include the extreme threshold value "
+                        f"'{threshold_text}'."
+                    ),
+                )
+            )
+        if sample_a_text not in prompt or sample_b_text not in prompt:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_values",
+                    detail=(
+                        "sample_size_neglect prompt must include both sample sizes "
+                        f"('{sample_a_text}' and '{sample_b_text}')."
+                    ),
+                )
+            )
+
+        if direction == "at_or_above":
+            direction_markers = ("at least", "at or above", "more than", "higher than")
+        else:
+            direction_markers = ("at most", "at or below", "less than", "no more than")
+        if not any(marker in lower for marker in direction_markers):
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_direction_semantics",
+                    detail=(
+                        "sample_size_neglect prompt must communicate event direction "
+                        "(at least / at most or equivalent)."
+                    ),
+                )
+            )
+
+        if not (
+            self._prompt_has_ab_option_markers(prompt=prompt)
+            or ("- choose_a" in lower and "- choose_b" in lower)
+        ):
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_ab_distinction",
+                    detail=(
+                        "sample_size_neglect prompt must clearly distinguish process A and B."
+                    ),
+                )
+            )
+
+        likelihood_markers = (
+            "more likely",
+            "likelier",
+            "higher probability",
+            "larger tail probability",
+            "larger binomial-tail probability",
+            "would show this event more often",
+            "ranks higher",
+            "higher realization probability",
+            "which one would show this event more often",
+        )
+        if not any(marker in lower for marker in likelihood_markers):
+            failures.append(
+                self._prompt_qa_failure(
+                    code="missing_sample_size_likelihood_comparison",
+                    detail=(
+                        "sample_size_neglect prompt must ask which process is more likely to "
+                        "realize the extreme event."
+                    ),
+                )
+            )
+
+        frame_markers_by_frame = {
+            "hospital_births": ("hospital", "birth", "girl"),
+            "fund_returns": ("fund", "up-share", "stock"),
+            "quality_control_batches": ("line", "batch", "pass"),
+        }
+        frame_markers = frame_markers_by_frame.get(frame_variant, tuple())
+        if frame_markers and not any(marker in lower for marker in frame_markers):
+            failures.append(
+                self._prompt_qa_failure(
+                    code="sample_size_frame_inconsistent",
+                    detail=(
+                        f"sample_size_neglect prompt for frame '{frame_variant}' is missing "
+                        "frame-native wording."
+                    ),
+                )
+            )
+        return failures
+
     def _qa_validate_rendered_prompt(
         self,
         *,
@@ -3619,6 +4248,73 @@ class BeliefBiasGenerator(BaseGenerator):
         failures = self._prompt_qa_generic_failures(prompt=prompt)
         lower = prompt.lower()
         active_regime = prompt_style_regime or self._resolve_prompt_style_regime()
+        if task_subtype == "base_rate_neglect":
+            failures.extend(
+                self._validate_base_rate_neglect_prompt_completeness(
+                    prompt=prompt,
+                    problem_spec=problem_spec,
+                    frame_variant=frame_variant,
+                )
+            )
+            required_markers_by_frame = {
+                "medical_screening": ("condition", "screening test"),
+                "fraud_detection": ("payment", "fraud"),
+                "hiring_screen": ("candidate", "screen"),
+                "security_alert": ("threat", "alert"),
+                "trading_signal": ("market", "signal"),
+                "neutral_statistical": ("class", "signal"),
+            }
+            forbidden_markers_by_frame = {
+                "medical_screening": ("credit screen", "borrower", "applicant"),
+                "fraud_detection": ("candidate", "hiring"),
+                "hiring_screen": ("credit screen", "borrower", "payment", "fraud"),
+                "security_alert": ("borrower", "candidate"),
+                "trading_signal": ("borrower", "candidate", "fraud system"),
+                "neutral_statistical": (),
+            }
+            if "interpret high as" in lower:
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_prefix_interpretation_leak",
+                        detail=(
+                            "base_rate_neglect prompt should render frame semantics in-body, "
+                            "not via 'Interpret high as...' prefix injection."
+                        ),
+                    )
+                )
+            required_markers = required_markers_by_frame.get(
+                frame_variant,
+                required_markers_by_frame["neutral_statistical"],
+            )
+            if not all(marker in lower for marker in required_markers):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_frame_inconsistent",
+                        detail=(
+                            f"base_rate_neglect prompt for frame '{frame_variant}' is missing "
+                            f"expected frame markers {required_markers}."
+                        ),
+                    )
+                )
+            forbidden_markers = forbidden_markers_by_frame.get(frame_variant, ())
+            if any(marker in lower for marker in forbidden_markers):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="base_rate_cross_frame_wording",
+                        detail=(
+                            f"base_rate_neglect prompt for frame '{frame_variant}' contains "
+                            "wording from another frame."
+                        ),
+                    )
+                )
+        if task_subtype == "sample_size_neglect":
+            failures.extend(
+                self._validate_sample_size_neglect_prompt_completeness(
+                    prompt=prompt,
+                    problem_spec=problem_spec,
+                    frame_variant=frame_variant,
+                )
+            )
         if task_subtype == "conjunction_fallacy":
             option_a = problem_spec["options"]["A"]["event_label"].lower()
             option_b = problem_spec["options"]["B"]["event_label"].lower()
@@ -3721,9 +4417,44 @@ class BeliefBiasGenerator(BaseGenerator):
                             code="non_native_coin_phrase_leak",
                             detail=(
                                 "Non-coin gambler frame contains literal coin-flip answer phrase."
-                            ),
-                        )
+                        ),
                     )
+                )
+            fairness_markers_by_frame = {
+                "neutral_coin": ("fair coin", "50/50", "50-50"),
+                "roulette_streak": ("fair wheel", "50/50", "50-50"),
+                "sports_streak": ("50/50", "50-50", "fair"),
+                "market_streak": ("50/50", "50-50", "unchanged"),
+            }
+            independence_markers = (
+                "independent",
+                "independence",
+                "independent of",
+            )
+            fairness_markers = fairness_markers_by_frame.get(
+                frame_variant,
+                fairness_markers_by_frame["neutral_coin"],
+            )
+            if not any(marker in lower for marker in fairness_markers):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="missing_gambler_fairness_assumption",
+                        detail=(
+                            "Gambler prompt must explicitly communicate fair/unchanged "
+                            "50/50 odds."
+                        ),
+                    )
+                )
+            if not any(marker in lower for marker in independence_markers):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="missing_gambler_independence_assumption",
+                        detail=(
+                            "Gambler prompt must explicitly communicate independence from "
+                            "prior outcomes."
+                        ),
+                    )
+                )
             option_lines = [
                 line.strip().lower()
                 for line in prompt.splitlines()

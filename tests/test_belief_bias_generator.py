@@ -164,6 +164,730 @@ def test_belief_bias_subtypes_expose_action_value_semantics_metadata():
         assert metrics["action_value_semantics"] == expected[dp.task_subtype]
 
 
+def test_base_rate_neglect_frame_native_rendering_has_no_interpret_prefix():
+    gen = BeliefBiasGenerator(
+        seed=1510,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.7,
+        p_signal_high_given_low=0.2,
+        observed_signal="high",
+    )
+    prompt = gen._render_base_rate_neglect_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    assert "interpret high as" not in prompt.lower()
+    lower = prompt.lower()
+    assert "candidate" in lower
+    assert "screen" in lower
+    assert "high-risk" not in lower
+    assert "credit screen" not in lower
+
+
+@pytest.mark.parametrize(
+    ("frame_variant", "required_markers"),
+    (
+        ("medical_screening", ("condition", "screening test")),
+        ("fraud_detection", ("payment", "fraud")),
+        ("hiring_screen", ("candidate", "screen")),
+        ("security_alert", ("threat", "alert")),
+        ("trading_signal", ("market", "signal")),
+        ("neutral_statistical", ("class", "signal")),
+    ),
+)
+def test_base_rate_neglect_prompt_contains_frame_markers(
+    frame_variant: str, required_markers: tuple[str, str]
+):
+    gen = BeliefBiasGenerator(
+        seed=1511,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant=frame_variant,
+    )
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.35,
+        p_signal_high_given_high=0.8,
+        p_signal_high_given_low=0.3,
+        observed_signal="low",
+    )
+    prompt = gen._render_base_rate_neglect_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant=frame_variant,
+    ).lower()
+    assert all(marker in prompt for marker in required_markers)
+
+
+def test_prompt_qa_flags_base_rate_frame_mismatch():
+    gen = BeliefBiasGenerator(seed=1512)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.31,
+        p_signal_high_given_high=0.9,
+        p_signal_high_given_low=0.18,
+        observed_signal="high",
+    )
+    bad_prompt = (
+        "Interpret high as strong-fit and low as weak-fit. "
+        "A credit screen has default base rate 0.31. "
+        "The alert appears with chance 0.9 for high-risk and 0.18 for low-risk. "
+        "This case came back positive. Which class is more likely?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_prefix_interpretation_leak" in codes
+    assert "base_rate_cross_frame_wording" in codes
+
+
+def test_prompt_qa_flags_base_rate_missing_core_update_fields():
+    gen = BeliefBiasGenerator(seed=1513)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    bad_prompt = (
+        "The candidate received a weak automated screen result. "
+        "Which class is more likely now?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "missing_base_rate_prior" in codes
+    assert "missing_base_rate_cue_rate_pair" in codes
+    assert "missing_base_rate_state_anchors" in codes
+
+
+def test_prompt_qa_flags_low_signal_natural_language_raw_rate_usage():
+    gen = BeliefBiasGenerator(seed=1516)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    bad_prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "This result appears with probability 0.68 when the candidate is a strong fit and "
+        "0.20 when the candidate is not a strong fit. "
+        "Which state is more likely?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_missing_observed_cue_pair" in codes
+    assert "base_rate_low_cue_uses_raw_rates" in codes
+
+
+def test_prompt_qa_allows_formal_explicit_parameterization_with_raw_positive_rates():
+    gen = BeliefBiasGenerator(seed=1517)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    ok_prompt = (
+        "In this hiring screen, the strong-fit base rate is 0.41. "
+        "Use P(positive|the candidate is a strong fit)=0.68 and "
+        "P(positive|the candidate is not a strong fit)=0.20. "
+        "The candidate received a weak automated screen result. "
+        "Determine whether high or low is now more probable."
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=ok_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="normative_explicit",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_prompt_qa_allows_low_signal_natural_language_with_complement_rates():
+    gen = BeliefBiasGenerator(seed=1522)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    good_prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "A negative result appears with probability 0.32 when the candidate is a strong fit and "
+        "0.8 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=good_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_missing_observed_cue_pair" not in codes
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_prompt_qa_flags_ambiguous_base_rate_parameterization_mixing():
+    gen = BeliefBiasGenerator(seed=1518)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    bad_prompt = (
+        "In this hiring screen, the strong-fit base rate is 0.41. "
+        "Use P(positive|the candidate is a strong fit)=0.68 and "
+        "P(positive|the candidate is not a strong fit)=0.20. "
+        "This result appears with probability 0.68 when the candidate is a strong fit and "
+        "0.20 when the candidate is not a strong fit. "
+        "The candidate received a weak automated screen result. Which state is more likely?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="normative_explicit",
+    )
+    assert any(
+        failure["code"] == "base_rate_ambiguous_parameterization_mix"
+        for failure in failures
+    )
+
+
+def test_prompt_qa_allows_high_signal_explicit_formal_prompt():
+    gen = BeliefBiasGenerator(seed=1523)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.31,
+        p_signal_high_given_high=0.9,
+        p_signal_high_given_low=0.18,
+        observed_signal="high",
+    )
+    prompt = (
+        "For this decision setting, the condition-present prevalence is 0.31. "
+        "Use P(positive|the condition is present)=0.9 and "
+        "P(positive|the condition is absent)=0.18. "
+        "The screening test came back positive. "
+        "Determine whether the condition is more likely present or absent."
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=prompt,
+        problem_spec=problem_spec,
+        frame_variant="medical_screening",
+        prompt_style_regime="normative_explicit",
+    )
+    assert not failures
+
+
+def _base_rate_prompt_fail_codes(
+    *,
+    gen: BeliefBiasGenerator,
+    prompt: str,
+    observed_signal: str,
+    frame_variant: str,
+) -> set[str]:
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41 if observed_signal == "low" else 0.31,
+        p_signal_high_given_high=0.68 if observed_signal == "low" else 0.9,
+        p_signal_high_given_low=0.2 if observed_signal == "low" else 0.18,
+        observed_signal=observed_signal,
+    )
+    failures = gen._validate_base_rate_neglect_prompt_completeness(
+        prompt=prompt,
+        problem_spec=problem_spec,
+        frame_variant=frame_variant,
+    )
+    return {failure["code"] for failure in failures}
+
+
+def test_base_rate_focused_low_signal_formal_raw_positive_parameterization_passes():
+    gen = BeliefBiasGenerator(seed=1601)
+    prompt = (
+        "For this decision setting, the condition-present prevalence is 0.41. "
+        "The screening test is positive with probability 0.68 when the condition is present "
+        "and 0.2 when the condition is absent. "
+        "The screening test came back negative. "
+        "Determine whether the condition is more likely present or absent."
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="medical_screening",
+    )
+    assert "base_rate_missing_observed_cue_pair" not in codes
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_base_rate_focused_low_signal_natural_complement_wording_passes():
+    gen = BeliefBiasGenerator(seed=1602)
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "A negative result appears with probability 0.32 when the candidate is a strong fit "
+        "and 0.8 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_missing_observed_cue_pair" not in codes
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_base_rate_focused_low_signal_natural_raw_positive_only_fails():
+    gen = BeliefBiasGenerator(seed=1603)
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "This result appears with probability 0.68 when the candidate is a strong fit and "
+        "0.2 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_missing_observed_cue_pair" in codes
+    assert "base_rate_low_cue_uses_raw_rates" in codes
+
+
+def test_base_rate_low_signal_natural_complements_with_swapped_state_mapping_fails():
+    gen = BeliefBiasGenerator(seed=1608)
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "A negative result appears with probability 0.8 when the candidate is a strong fit and "
+        "0.32 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_missing_observed_cue_pair" in codes
+
+
+def test_base_rate_low_signal_natural_wording_rejects_raw_pair_even_if_complements_present():
+    gen = BeliefBiasGenerator(seed=1609)
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.41. "
+        "A negative result appears with probability 0.32 when the candidate is a strong fit and "
+        "0.8 when the candidate is not a strong fit. "
+        "This result appears with probability 0.68 when the candidate is a strong fit and "
+        "0.2 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_low_cue_uses_raw_rates" in codes
+
+
+def test_base_rate_low_signal_overlap_pair_correct_mapping_passes():
+    gen = BeliefBiasGenerator(seed=1610)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.4,
+        p_signal_high_given_high=0.8,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.4. "
+        "A negative result appears with probability 0.2 when the candidate is a strong fit "
+        "and 0.8 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_missing_observed_cue_pair" not in codes
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_base_rate_low_signal_overlap_pair_incorrect_mapping_fails():
+    gen = BeliefBiasGenerator(seed=1611)
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.4,
+        p_signal_high_given_high=0.8,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = (
+        "The candidate received a weak automated screen result. "
+        "The strong-fit base rate is 0.4. "
+        "A negative result appears with probability 0.8 when the candidate is a strong fit "
+        "and 0.2 when the candidate is not a strong fit. "
+        "Which is more likely for this candidate: strong fit or not a strong fit?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="base_rate_neglect",
+        prompt=prompt,
+        problem_spec=problem_spec,
+        frame_variant="hiring_screen",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "base_rate_missing_observed_cue_pair" in codes
+    assert "base_rate_low_cue_uses_raw_rates" in codes
+
+
+def test_base_rate_state_mapped_cue_pair_helper_requires_correct_attachment():
+    gen = BeliefBiasGenerator(seed=16115)
+    prompt_good = (
+        "A negative result appears with probability 0.2 when the condition is present "
+        "and 0.8 when the condition is absent."
+    )
+    prompt_bad = (
+        "A negative result appears with probability 0.8 when the condition is present "
+        "and 0.2 when the condition is absent."
+    )
+    assert gen._base_rate_prompt_has_state_mapped_cue_pair(
+        prompt=prompt_good,
+        high_value_text="0.2",
+        low_value_text="0.8",
+        state_high_text="the condition is present",
+        state_low_text="the condition is absent",
+    )
+    assert not gen._base_rate_prompt_has_state_mapped_cue_pair(
+        prompt=prompt_bad,
+        high_value_text="0.2",
+        low_value_text="0.8",
+        state_high_text="the condition is present",
+        state_low_text="the condition is absent",
+    )
+
+
+def test_base_rate_numeric_substring_safety_for_state_attachment():
+    gen = BeliefBiasGenerator(seed=1612)
+    prompt = (
+        "A negative result appears with probability 0.25 when the candidate is a strong fit "
+        "and 0.75 when the candidate is not a strong fit."
+    )
+    assert not gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.2",
+        state_text="the candidate is a strong fit",
+    )
+    assert gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.25",
+        state_text="the candidate is a strong fit",
+    )
+
+
+def test_base_rate_state_attachment_does_not_jump_across_later_mapping_clause():
+    gen = BeliefBiasGenerator(seed=1613)
+    prompt = (
+        "A negative result appears with probability 0.2 when the condition is absent "
+        "and 0.8 when the condition is present."
+    )
+    assert gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.2",
+        state_text="the condition is absent",
+    )
+    assert not gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.2",
+        state_text="the condition is present",
+    )
+
+
+def test_base_rate_state_attachment_respects_punctuation_clause_boundaries():
+    gen = BeliefBiasGenerator(seed=16131)
+    prompt = (
+        "A negative result appears with probability 0.2 when the condition is absent, "
+        "and 0.8 when the condition is present."
+    )
+    assert gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.2",
+        state_text="the condition is absent",
+    )
+    assert not gen._base_rate_value_attached_to_state(
+        prompt=prompt,
+        value_text="0.2",
+        state_text="the condition is present",
+    )
+
+
+def test_base_rate_focused_low_signal_mixed_without_complements_fails_ambiguity():
+    gen = BeliefBiasGenerator(seed=1604)
+    prompt = (
+        "For this hiring screen, use P(positive|the candidate is a strong fit)=0.68 and "
+        "P(positive|the candidate is not a strong fit)=0.2. "
+        "This result appears with probability 0.68 when the candidate is a strong fit and "
+        "0.2 when the candidate is not a strong fit. "
+        "The candidate received a weak automated screen result."
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_ambiguous_parameterization_mix" in codes
+
+
+def test_base_rate_focused_low_signal_mixed_with_complements_passes():
+    gen = BeliefBiasGenerator(seed=16041)
+    prompt = (
+        "For this hiring screen, use P(positive|the candidate is a strong fit)=0.68 and "
+        "P(positive|the candidate is not a strong fit)=0.2. "
+        "A negative result appears with probability 0.32 when the candidate is a strong fit and "
+        "0.8 when the candidate is not a strong fit. "
+        "The candidate received a weak automated screen result."
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="low",
+        frame_variant="hiring_screen",
+    )
+    assert "base_rate_missing_observed_cue_pair" not in codes
+    assert "base_rate_low_cue_uses_raw_rates" not in codes
+    assert "base_rate_ambiguous_parameterization_mix" not in codes
+
+
+def test_base_rate_focused_high_signal_formal_raw_positive_parameterization_passes():
+    gen = BeliefBiasGenerator(seed=1605)
+    prompt = (
+        "For this decision setting, the condition-present prevalence is 0.31. "
+        "Use P(positive|the condition is present)=0.9 and "
+        "P(positive|the condition is absent)=0.18. "
+        "The screening test came back positive. "
+        "Determine whether the condition is more likely present or absent."
+    )
+    codes = _base_rate_prompt_fail_codes(
+        gen=gen,
+        prompt=prompt,
+        observed_signal="high",
+        frame_variant="medical_screening",
+    )
+    assert not codes
+
+
+def test_base_rate_observed_cue_natural_wording_detector_positive_cases():
+    gen = BeliefBiasGenerator(seed=1606)
+    prompts = (
+        "A negative result appears with probability 0.1 when the condition is present.",
+        "A positive signal appears with probability 0.9 when the payment is fraudulent.",
+        "This result is seen with probability 0.32 when the candidate is a strong fit.",
+        "This signal shows up with probability 0.8 when the condition is absent.",
+        "A result like this shows up with probability 0.2 when class low is true.",
+        "The chance of this result is 0.32 when the condition is present.",
+        "The chance of a negative result is 0.8 when the condition is absent.",
+        "The chance of a positive signal is 0.9 when the condition is present.",
+    )
+    for prompt in prompts:
+        assert gen._base_rate_prompt_uses_observed_cue_natural_wording(prompt=prompt)
+
+
+def test_base_rate_observed_cue_natural_wording_detector_excludes_formal_parameterization():
+    gen = BeliefBiasGenerator(seed=1607)
+    prompts = (
+        "The screening test is positive with probability 0.9 when the condition is present.",
+        "P(positive | high)=0.9 and P(positive | low)=0.2.",
+        "P(signal = high | class high)=0.9 and P(signal = high | class low)=0.2.",
+    )
+    for prompt in prompts:
+        assert not gen._base_rate_prompt_uses_observed_cue_natural_wording(prompt=prompt)
+
+
+def test_base_rate_renderer_low_signal_neutral_uses_observed_cue_complements():
+    gen = BeliefBiasGenerator(
+        seed=1519,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = gen._render_base_rate_neglect_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    lower = prompt.lower()
+    assert "a negative result appears with probability 0.32" in lower
+    assert " and 0.8 when the candidate is not a strong fit" in lower
+    assert not re.search(
+        r"negative result appears with probability\s+0\.68[^\n]{0,80}0\.2",
+        lower,
+    )
+
+
+def test_base_rate_renderer_low_signal_formal_allows_explicit_positive_parameterization():
+    gen = BeliefBiasGenerator(
+        seed=1520,
+        prompt_style="default",
+        prompt_style_regime="normative_explicit",
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = gen._render_base_rate_neglect_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="normative_explicit",
+        prompt_frame_variant="hiring_screen",
+    ).lower()
+    assert "is positive with probability 0.68" in prompt
+    assert "and 0.2 when the candidate is not a strong fit" in prompt
+    assert "the candidate received a weak automated screen result" in prompt
+
+
+@pytest.mark.parametrize(
+    ("frame_variant", "expected_tail"),
+    (
+        ("hiring_screen", "strong fit or not a strong fit?"),
+        ("fraud_detection", "fraudulent or legitimate?"),
+        ("medical_screening", "condition present or absent?"),
+    ),
+)
+def test_base_rate_frame_native_endings_avoid_generic_high_low_phrase(
+    frame_variant: str, expected_tail: str
+):
+    gen = BeliefBiasGenerator(
+        seed=1521,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant=frame_variant,
+    )
+    problem_spec = gen._build_base_rate_neglect_problem_spec(
+        prior_high=0.37,
+        p_signal_high_given_high=0.81,
+        p_signal_high_given_low=0.25,
+        observed_signal="high",
+    )
+    prompt = gen._render_base_rate_neglect_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant=frame_variant,
+    ).lower()
+    assert expected_tail in prompt
+    assert "high or low?" not in prompt
+
+
+def test_prompt_qa_flags_sample_size_missing_threshold_or_sizes():
+    gen = BeliefBiasGenerator(seed=1514)
+    problem_spec = gen._build_sample_size_neglect_problem_spec(
+        sample_size_a=20,
+        sample_size_b=150,
+        baseline_rate=0.45,
+        extreme_threshold=0.35,
+        extreme_direction="at_or_below",
+    )
+    bad_prompt = (
+        "Two hospitals have the same long-run girl-share of 0.45. "
+        "Which hospital seems better?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="sample_size_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="hospital_births",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "missing_sample_size_threshold" in codes
+    assert "missing_sample_size_values" in codes
+    assert "missing_sample_size_likelihood_comparison" in codes
+
+
+def test_prompt_qa_flags_sample_size_prompt_without_ab_distinction():
+    gen = BeliefBiasGenerator(seed=1515)
+    problem_spec = gen._build_sample_size_neglect_problem_spec(
+        sample_size_a=30,
+        sample_size_b=150,
+        baseline_rate=0.5,
+        extreme_threshold=0.65,
+        extreme_direction="at_or_above",
+    )
+    bad_prompt = (
+        "Two funds have the same long-run up-share of 0.5. "
+        "Event is at least 0.65 up-share. "
+        "One sample size is 30 and another is 150. "
+        "Which is more likely?"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="sample_size_neglect",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="fund_returns",
+        prompt_style_regime="neutral_realistic",
+    )
+    assert any(
+        failure["code"] == "missing_sample_size_ab_distinction"
+        for failure in failures
+    )
+
+
 def test_overprecision_problem_spec_serialization_uses_clean_interval_decimals():
     gen = BeliefBiasGenerator(seed=31)
     dp = gen._generate_overprecision_calibration(0)
@@ -214,25 +938,17 @@ def test_gambler_normative_explicit_contains_independence_cue():
     gen = BeliefBiasGenerator(seed=91, prompt_style_regime="normative_explicit")
     dp = gen._generate_gambler_fallacy(0)
     lower_prompt = dp.input.lower()
-    assert "independence" in lower_prompt or "50/50" in lower_prompt
+    assert ("independence" in lower_prompt or "independent" in lower_prompt)
+    assert "50/50" in lower_prompt or "fair" in lower_prompt
 
 
-def test_gambler_non_normative_prompts_avoid_explicit_independence_cues():
-    forbidden = (
-        "same process",
-        "same chance each trial",
-        "setup stays the same",
-        "independence",
-        "trial independence",
-        "50/50 odds",
-        "unchanged 50/50",
-    )
+def test_gambler_non_normative_prompts_include_fairness_and_independence_cues():
     for regime in ("neutral_realistic", "bias_eliciting"):
         gen = BeliefBiasGenerator(seed=92, prompt_style_regime=regime)
         dp = gen._generate_gambler_fallacy(0)
         lower_prompt = dp.input.lower()
-        for phrase in forbidden:
-            assert phrase not in lower_prompt
+        assert "50/50" in lower_prompt or "fair" in lower_prompt
+        assert "independent" in lower_prompt or "independence" in lower_prompt
 
 
 def test_gambler_bias_prompts_do_not_explain_the_bias_directly():
@@ -401,6 +1117,108 @@ def test_prompt_qa_flags_non_native_coin_phrase_in_market_frame():
         frame_variant="market_streak",
     )
     assert any(failure["code"] == "non_native_coin_phrase_leak" for failure in failures)
+
+
+def test_prompt_qa_flags_missing_gambler_fairness_and_independence_assumptions():
+    gen = BeliefBiasGenerator(seed=1430)
+    problem_spec = gen._build_gambler_fallacy_problem_spec(
+        p_heads=0.5,
+        queried_outcome="heads",
+        recent_sequence="HHHHTT",
+        correct_claim_in_option_a=True,
+    )
+    bad_prompt = (
+        "Wheel history panel shows HHHHTT. At this table, H=red and T=black. "
+        "Which statement is better about the next spin?\n"
+        "- choose_A: after that streak, the next spin is more likely to land red than black\n"
+        "- choose_B: given this streak, the next spin is not more likely to land red than black"
+    )
+    failures = gen._qa_validate_rendered_prompt(
+        task_subtype="gambler_fallacy",
+        prompt=bad_prompt,
+        problem_spec=problem_spec,
+        frame_variant="roulette_streak",
+        prompt_style_regime="neutral_realistic",
+    )
+    codes = {failure["code"] for failure in failures}
+    assert "missing_gambler_fairness_assumption" in codes
+    assert "missing_gambler_independence_assumption" in codes
+
+
+def test_rendered_gambler_prompts_pass_new_assumption_qa_checks():
+    for regime in ("normative_explicit", "neutral_realistic", "bias_eliciting"):
+        for frame_variant in (
+            "neutral_coin",
+            "roulette_streak",
+            "sports_streak",
+            "market_streak",
+        ):
+            gen = BeliefBiasGenerator(
+                seed=1431,
+                prompt_style="default",
+                prompt_style_regime=regime,
+                prompt_frame_variant=frame_variant,
+            )
+            dp = gen._generate_gambler_fallacy(0)
+            failures = gen._qa_validate_rendered_prompt(
+                task_subtype="gambler_fallacy",
+                prompt=dp.input,
+                problem_spec=dp.problem_spec,
+                frame_variant=frame_variant,
+                prompt_style_regime=regime,
+            )
+            codes = {failure["code"] for failure in failures}
+            assert "missing_gambler_fairness_assumption" not in codes
+            assert "missing_gambler_independence_assumption" not in codes
+
+
+def test_prompt_option_distinction_accepts_ab_equals_markers():
+    gen = BeliefBiasGenerator(seed=1501)
+    target = gen._generate_sample_size_neglect(0).target
+    prompt = "Case note: A='Hospital A', B='Hospital B'. Which one is more likely?"
+    gen._assert_prompt_option_distinction(prompt=prompt, target=target)
+
+
+def test_prompt_option_distinction_accepts_option_a_option_b_markers():
+    gen = BeliefBiasGenerator(seed=1502)
+    target = gen._generate_overprecision_calibration(0).target
+    prompt = (
+        "Forecast comparison: Option A: [71.2, 88.5]. Option B: [66.0, 94.0]. "
+        "Which interval is more likely to contain the realized value?"
+    )
+    gen._assert_prompt_option_distinction(prompt=prompt, target=target)
+
+
+def test_prompt_option_distinction_accepts_frame_native_ab_markers():
+    gen = BeliefBiasGenerator(seed=1503)
+    target = gen._generate_sample_size_neglect(0).target
+    prompt = (
+        "Hospital A sees 20 births per day. Hospital B sees 150 births per day. "
+        "Which hospital is more likely to show an extreme day?"
+    )
+    gen._assert_prompt_option_distinction(prompt=prompt, target=target)
+
+
+def test_prompt_option_distinction_requires_both_ab_markers():
+    gen = BeliefBiasGenerator(seed=1504)
+    target = gen._generate_overprecision_calibration(0).target
+    prompt = "Comparison sheet: interval A is [70, 90]. Which one should we use?"
+    with pytest.raises(
+        ValueError,
+        match="Prompt must clearly distinguish both options for choose_A/choose_B tasks.",
+    ):
+        gen._assert_prompt_option_distinction(prompt=prompt, target=target)
+
+
+def test_prompt_option_distinction_does_not_pass_on_stray_letters():
+    gen = BeliefBiasGenerator(seed=1505)
+    target = gen._generate_sample_size_neglect(0).target
+    prompt = "A manager wrote a brief note before a baseline review."
+    with pytest.raises(
+        ValueError,
+        match="Prompt must clearly distinguish both options for choose_A/choose_B tasks.",
+    ):
+        gen._assert_prompt_option_distinction(prompt=prompt, target=target)
 
 
 def test_prompt_qa_flags_missing_overprecision_intervals_or_center():
