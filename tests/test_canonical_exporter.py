@@ -57,10 +57,16 @@ def test_canonical_dict_has_stable_top_level_and_nested_key_order():
         "dataset_role",
         "requested_prompt_style",
         "resolved_prompt_style",
+        "prompt_style_regime",
+        "prompt_frame_variant",
         "prompt_has_action_labels",
         "example_fingerprint",
         "tie_threshold",
         "sample_index",
+        "semantic_context",
+        "conjunction_render_mode",
+        "representativeness_strength",
+        "streak_domain",
         "difficulty_metrics",
     ]
 

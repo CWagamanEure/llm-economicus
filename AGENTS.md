@@ -4,11 +4,14 @@ This file defines operating instructions for any coding agent working in this re
 
 ## 1) Mission
 
-Build and maintain a dataset generator for economic rationality tasks, currently focused on risk/loss/time-choice scenarios.
+Build and maintain a dataset generator for economic rationality and behavioral-decision tasks across multiple families:
+- `risk_loss_time_choice`
+- `bayesian_signal_extraction`
+- `belief_bias_judgment`
 
 Primary goals:
 - Keep generated data schema-consistent and deterministic under fixed seeds.
-- Preserve normative decision logic (expected value, discounting, prospect-value + constraints).
+- Preserve normative decision logic (EV/discounting, Bayesian updating, probability/independence logic, interval coverage logic).
 - Keep tests fast and meaningful.
 
 ## 2) Repository Map
@@ -18,14 +21,26 @@ Primary goals:
 - `src/data-generation/base_generator.py`
   - Abstract base generator and metadata helper.
 - `src/data-generation/risk_loss_time_generator.py`
-  - Main generator implementation for task subtypes:
+  - Generator for risky choice and intertemporal tasks.
+- `src/data-generation/bayesian_signal_generator.py`
+  - Generator for Bayesian signal extraction and posterior decision tasks.
+- `src/data-generation/belief_bias_generator.py`
+  - Generator for belief-bias judgment tasks.
+- `tests/test_risk_loss_time_generator.py`
+  - Unit tests for risk/loss/time generation and solver behavior.
+- `tests/test_bayesian_signal_generator.py`
+  - Unit tests for Bayesian generation/rendering/validation behavior.
+- `tests/test_belief_bias_generator.py`
+  - Unit tests for belief-bias generation/rendering/validation behavior.
+- `tests/test_prompt_rendering_contracts.py`
+  - Cross-family prompt rendering invariants and leakage checks.
+
+Risk/loss/time subtypes include:
     - `lottery_choice`
     - `certainty_equivalent`
     - `mixed_gain_loss_choice`
     - `prospect_gain_loss`
     - `time_discounting`
-- `tests/test_risk_loss_time_generator.py`
-  - Unit tests for task dispatch, metadata behavior, tie behavior, formulas, and bankruptcy logic.
 - `README.md`
   - Research framing, hypotheses, and intended benchmark/evaluation direction.
 
@@ -68,7 +83,7 @@ When changing generated data content:
 - Ensure every generated sample has:
   - clear `objective`
   - explicit `actions` including `"indifferent"` when ties are possible
-  - reproducible `expected_utilities`
+  - reproducible `action_values`/`decision_values` under the task's normative model
   - concise, verifiable `brief_rationale`
 
 ### 4.2 Determinism and randomness
@@ -82,10 +97,12 @@ When changing generated data content:
 
 - Tie handling must remain explicit via `"indifferent"`.
 - Keep objective and outcome model aligned with utility calculations.
-- For prospect tasks, maintain:
+- For risk/prospect tasks, maintain:
   - reference-dependent value function parameters
   - explicit bankruptcy/no-negative-final-wealth constraint
   - penalty override behavior used in expected utilities
+- For Bayesian tasks, maintain prior/likelihood/update consistency and posterior-payoff action scoring.
+- For belief-bias tasks, preserve logical semantics (conjunction subset relation, independence claims, binomial-tail comparisons, interval coverage objective).
 
 ### 4.4 Difficulty labels
 
@@ -108,7 +125,7 @@ When fixing a bug:
 
 - The source folder `src/data-generation` contains a hyphen; imports in tests currently use `sys.path` insertion. Do not "clean this up" opportunistically unless explicitly asked, because it can break test/import behavior.
 - Avoid broad refactors in the same change as logic fixes.
-- Do not silently change task text templates if tests or downstream consumers depend on formula strings.
+- Do not silently change task text templates if tests or downstream consumers depend on wording contracts, validation linting, or metadata fields (`prompt_style_regime`, `prompt_frame_variant`, `semantic_context`, etc.).
 
 ## 7) Change Workflow for Agents
 
@@ -129,4 +146,3 @@ A task is done when:
 - tests and lint pass locally,
 - schema and metadata invariants are preserved,
 - and the change summary is clear enough for another engineer to review quickly.
-

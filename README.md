@@ -33,12 +33,14 @@
 Run from repo root:
 
 ```bash
-poetry run python main.py --count 100 --seed 42 --output data/mock_risk_loss_time.jsonl
+poetry run python scripts/generate_training_dataset.py --count-per-generator 100 --seed 42 --format canonical --output data/mock_all_generators.jsonl
 ```
 
 Useful options:
 
 - `--prompt-style` one of `default`, `formal`, `plain_english`, `compact`, `finance_framed`, `unlabeled`, `random`
+- `--prompt-style-regime` one of `normative_explicit`, `neutral_realistic`, `bias_eliciting`, `random` (if supported by the called generator)
+- `--prompt-frame-variant` one of `auto` or frame-specific variants (generator-specific)
 - `--version` metadata version tag (default `v1`)
 
 ## Training Data
@@ -61,14 +63,19 @@ Useful options:
 ```
 
 `action_values` stores comparable action values under the task's normative model.
-In risk/loss tasks these are expected utilities; in time-discounting tasks these are discounted present values.
+Depending on subtype this may represent expected value/utility, discounted value, posterior probability, posterior expected payoff, binomial-tail probability, or interval-coverage probability.
 
 - Reproducibility metadata:
   - Each generated sample includes `metadata.seed` and `metadata.version`.
   - `metadata.seed` is the generator initialization seed (shared across samples in one run), not a per-example seed.
   - `metadata.sample_index` identifies the sample order within that seeded run.
   - `problem_spec.assumptions.tie_epsilon` records the tie-threshold used for decision comparisons.
-  - Prompt rendering supports multiple styles (`default`, `formal`, `plain_english`, `compact`, `finance_framed`) via `RiskLossTimeGenerator(prompt_style=...)`; `prompt_style="random"` samples a style deterministically from the generator RNG.
+  - Prompt rendering supports style and framing metadata including:
+    - `prompt_style`
+    - `prompt_style_regime`
+    - `prompt_frame_variant`
+    - `semantic_context` (when applicable)
+  - Random style/regime/frame selection remains deterministic under fixed seed.
 
 - For **market tasks**, we extend with:
 
@@ -88,23 +95,25 @@ In risk/loss tasks these are expected utilities; in time-discounting tasks these
 - lotteries
 - certainty equivalents
 - prospect-style gain/loss problems
-- time discounting problems
+- probability weighting
+- ambiguity-themed EV comparisons under stated subjective beliefs
+- time discounting problems / hyperbolic discounting
 
-2. **Strategic game tasks**
-
-- ultimatum
-- dictator
-- prisoner's dilemma
-- public goods
-- second-price auctions
-
-3. Bayesian updating and signal extraction
+2. **Bayesian updating and signal extraction**
 
 - basic prior/liklihood/posterior tasks
 - information cascades
 - noisy signal trading and fundamental-value updates
 
-4. Financial decision tasks
+3. **Belief-bias judgment tasks**
+
+- base-rate neglect
+- conjunction fallacy
+- gamblers fallacy
+- sample-size neglect
+- overprecision / overestimation
+
+4. Financial decision tasks (future/extended scope)
 
 - arbitrage under frictions
 - portfolio allocation under volatility and frictions
@@ -112,7 +121,7 @@ In risk/loss tasks these are expected utilities; in time-discounting tasks these
 - valuation vs current price
 - limit vs market order choice
 
-5. Bias-counterexample tasks
+5. Bias-counterexample tasks (future/extended scope)
 
 - sunk cost
 - anchoring
@@ -170,3 +179,11 @@ In risk/loss tasks these are expected utilities; in time-discounting tasks these
 - more deterministic
 - over optimizes in one benchmark
 - less context-sensitive 
+
+## Generate Training Dataset (All Generators)
+
+Run from repo root:
+
+```bash
+poetry run python scripts/generate_training_dataset.py --count-per-generator 100 --seed 42 --format canonical --output data/training_all_generators.jsonl
+```

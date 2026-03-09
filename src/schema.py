@@ -15,6 +15,14 @@ class TimeDiscountingAssumptions(TypedDict):
     tie_epsilon: float
 
 
+class AmbiguityAversionAssumptions(TypedDict):
+    known_probability: float
+    subjective_ambiguous_win_probability: float
+    utility_model: Literal["linear"]
+    decision_rule: Literal["expected_value_maximization"]
+    tie_epsilon: float
+
+
 class CertainOption(TypedDict):
     type: Literal["certain"]
     amount: int | float
@@ -53,6 +61,36 @@ class DelayedOption(TypedDict):
     delay_days: int
 
 
+class KnownRiskLotteryOption(TypedDict):
+    type: Literal["known_risk_lottery"]
+    p_win: float
+    win_amount: int
+    lose_amount: int
+
+
+class AmbiguousLotteryOption(TypedDict):
+    type: Literal["ambiguous_lottery"]
+    win_amount: int
+    lose_amount: int
+
+
+class StatusQuoOption(TypedDict):
+    type: Literal["status_quo"]
+    amount: int
+
+
+class EarlierOption(TypedDict):
+    type: Literal["earlier"]
+    amount: int
+    delay_days: int
+
+
+class LaterOption(TypedDict):
+    type: Literal["later"]
+    amount: float
+    delay_days: int
+
+
 class LotteryOptions(TypedDict):
     A: CertainOption
     B: LotteryOption
@@ -71,6 +109,26 @@ class MixedGainLossOptions(TypedDict):
 class TimeDiscountingOptions(TypedDict):
     A: ImmediateOption
     B: DelayedOption
+
+
+class AmbiguityAversionOptions(TypedDict):
+    A: KnownRiskLotteryOption
+    B: AmbiguousLotteryOption
+
+
+class ProbabilityWeightingCounterexampleOptions(TypedDict):
+    A: CertainOption
+    B: LotteryOption
+
+
+class LossAversionCounterexampleOptions(TypedDict):
+    A: StatusQuoOption
+    B: MixedLotteryOption
+
+
+class HyperbolicDiscountingCounterexampleOptions(TypedDict):
+    A: EarlierOption
+    B: LaterOption
 
 
 class LotteryProblemSpec(TypedDict):
@@ -98,6 +156,34 @@ class TimeDiscountingProblemSpec(TypedDict):
     task_subtype: Literal["time_discounting"]
     objective: str
     options: TimeDiscountingOptions
+    assumptions: TimeDiscountingAssumptions
+
+
+class AmbiguityAversionChoiceProblemSpec(TypedDict):
+    task_subtype: Literal["ambiguity_aversion_choice"]
+    objective: str
+    options: AmbiguityAversionOptions
+    assumptions: AmbiguityAversionAssumptions
+
+
+class ProbabilityWeightingCounterexampleProblemSpec(TypedDict):
+    task_subtype: Literal["probability_weighting_counterexample"]
+    objective: str
+    options: ProbabilityWeightingCounterexampleOptions
+    assumptions: ExpectedValueAssumptions
+
+
+class LossAversionCounterexampleProblemSpec(TypedDict):
+    task_subtype: Literal["loss_aversion_counterexample"]
+    objective: str
+    options: LossAversionCounterexampleOptions
+    assumptions: ExpectedValueAssumptions
+
+
+class HyperbolicDiscountingCounterexampleProblemSpec(TypedDict):
+    task_subtype: Literal["hyperbolic_discounting_counterexample"]
+    objective: str
+    options: HyperbolicDiscountingCounterexampleOptions
     assumptions: TimeDiscountingAssumptions
 
 
@@ -195,15 +281,148 @@ class NoisySignalAssetUpdateProblemSpec(TypedDict):
     assumptions: BayesianAssumptions
 
 
+class ConjunctionFallacyAssumptions(TypedDict):
+    decision_rule: Literal["probability_axiom_comparison"]
+    tie_epsilon: float
+    profile_description: NotRequired[str]
+    semantic_domain: NotRequired[str]
+
+
+class GamblerFallacyAssumptions(TypedDict):
+    p_heads: float
+    queried_outcome: Literal["heads", "tails"]
+    recent_sequence: str
+    independence_assumption: bool
+    decision_rule: Literal["independence_claim_validation"]
+    tie_epsilon: float
+
+
+class SampleSizeNeglectAssumptions(TypedDict):
+    baseline_rate: float
+    extreme_threshold: float
+    extreme_direction: Literal["at_or_above", "at_or_below"]
+    decision_rule: Literal["compare_extreme_frequency_probability"]
+    tie_epsilon: float
+
+
+class OverprecisionCalibrationAssumptions(TypedDict):
+    error_model: Literal["normal"]
+    true_value_mean: float
+    true_value_sd: float
+    decision_rule: Literal["maximize_interval_coverage"]
+    tie_epsilon: float
+
+
+class ConjunctionEventOption(TypedDict):
+    type: Literal["event_probability_claim"]
+    event_role: Literal["constituent", "conjunction"]
+    event_label: str
+    probability: float
+
+
+class NextOutcomeOption(TypedDict):
+    type: Literal["next_outcome"]
+    outcome: Literal["heads", "tails"]
+
+
+class GamblerClaimOption(TypedDict):
+    type: Literal["independence_claim"]
+    claim_type: Literal["more_likely", "not_more_likely"]
+
+
+class SampleProcessOption(TypedDict):
+    type: Literal["sample_process"]
+    sample_size: int
+    baseline_rate: float
+    extreme_threshold: float
+    extreme_direction: Literal["at_or_above", "at_or_below"]
+
+
+class PredictionIntervalOption(TypedDict):
+    type: Literal["prediction_interval"]
+    center: float
+    lower: float
+    upper: float
+
+
+class BaseRateNeglectOptions(TypedDict):
+    A: StateHypothesisOption
+    B: StateHypothesisOption
+
+
+class ConjunctionFallacyOptions(TypedDict):
+    A: ConjunctionEventOption
+    B: ConjunctionEventOption
+
+
+class GamblerFallacyOptions(TypedDict):
+    A: GamblerClaimOption
+    B: GamblerClaimOption
+
+
+class SampleSizeNeglectOptions(TypedDict):
+    A: SampleProcessOption
+    B: SampleProcessOption
+
+
+class OverprecisionCalibrationOptions(TypedDict):
+    A: PredictionIntervalOption
+    B: PredictionIntervalOption
+
+
+class BaseRateNeglectProblemSpec(TypedDict):
+    task_subtype: Literal["base_rate_neglect"]
+    objective: str
+    options: BaseRateNeglectOptions
+    assumptions: BayesianAssumptions
+
+
+class ConjunctionFallacyProblemSpec(TypedDict):
+    task_subtype: Literal["conjunction_fallacy"]
+    objective: str
+    options: ConjunctionFallacyOptions
+    assumptions: ConjunctionFallacyAssumptions
+
+
+class GamblerFallacyProblemSpec(TypedDict):
+    task_subtype: Literal["gambler_fallacy"]
+    objective: str
+    options: GamblerFallacyOptions
+    assumptions: GamblerFallacyAssumptions
+
+
+class SampleSizeNeglectProblemSpec(TypedDict):
+    task_subtype: Literal["sample_size_neglect"]
+    objective: str
+    options: SampleSizeNeglectOptions
+    assumptions: SampleSizeNeglectAssumptions
+
+
+class OverprecisionCalibrationProblemSpec(TypedDict):
+    task_subtype: Literal["overprecision_calibration"]
+    objective: str
+    options: OverprecisionCalibrationOptions
+    assumptions: OverprecisionCalibrationAssumptions
+
+
 ProblemSpec = (
     LotteryProblemSpec
     | CeOfferComparisonProblemSpec
     | MixedGainLossProblemSpec
     | TimeDiscountingProblemSpec
+    | AmbiguityAversionChoiceProblemSpec
+    | ProbabilityWeightingCounterexampleProblemSpec
+    | LossAversionCounterexampleProblemSpec
+    | HyperbolicDiscountingCounterexampleProblemSpec
     | BasicBayesUpdateProblemSpec
     | BinarySignalDecisionProblemSpec
     | InformationCascadeProblemSpec
     | NoisySignalAssetUpdateProblemSpec
+    | BaseRateNeglectProblemSpec
+    | ConjunctionFallacyProblemSpec
+    | GamblerFallacyProblemSpec
+    | SampleSizeNeglectProblemSpec
+    | OverprecisionCalibrationProblemSpec
 )
 
 RiskLossTimeTaskSubtype = Literal[
@@ -211,6 +430,10 @@ RiskLossTimeTaskSubtype = Literal[
     "ce_offer_comparison",
     "mixed_gain_loss_choice",
     "time_discounting",
+    "ambiguity_aversion_choice",
+    "probability_weighting_counterexample",
+    "loss_aversion_counterexample",
+    "hyperbolic_discounting_counterexample",
 ]
 
 BayesianSignalTaskSubtype = Literal[
@@ -220,7 +443,15 @@ BayesianSignalTaskSubtype = Literal[
     "noisy_signal_asset_update",
 ]
 
-TaskSubtype = RiskLossTimeTaskSubtype | BayesianSignalTaskSubtype
+BeliefBiasTaskSubtype = Literal[
+    "base_rate_neglect",
+    "conjunction_fallacy",
+    "gambler_fallacy",
+    "sample_size_neglect",
+    "overprecision_calibration",
+]
+
+TaskSubtype = RiskLossTimeTaskSubtype | BayesianSignalTaskSubtype | BeliefBiasTaskSubtype
 
 
 class ComparisonPair(TypedDict):
@@ -300,6 +531,10 @@ class Metadata:
     requested_prompt_style: str | None
     # Prompt style actually used to render this sample.
     resolved_prompt_style: str | None
+    # High-level prompt wording regime controlling explicitness and bias salience.
+    prompt_style_regime: str | None
+    # Framing variant used for the rendered prompt text.
+    prompt_frame_variant: str | None
     # Whether rendered prompt text includes explicit action labels/tokens.
     prompt_has_action_labels: bool
     # Deterministic fingerprint for this sample's core structured content.
@@ -310,6 +545,14 @@ class Metadata:
     difficulty_metrics: dict[str, Any]
     # Monotonic index of the generated sample within a generator instance.
     sample_index: int | None = None
+    # Domain context used to semantically frame the prompt.
+    semantic_context: str | None = None
+    # Conjunction renderer regime used for conjunction-fallacy prompts.
+    conjunction_render_mode: str | None = None
+    # Heuristic intensity of representativeness salience in conjunction framing.
+    representativeness_strength: str | None = None
+    # Domain used for gambler-streak framing (coin/roulette/basketball/market).
+    streak_domain: str | None = None
 
 
 @dataclass
