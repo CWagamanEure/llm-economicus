@@ -551,6 +551,70 @@ def _extract_reliability_phrase_bucket(prompt: str) -> str:
     return "other"
 
 
+def _has_explicit_high_signal_parameterization(prompt: str) -> bool:
+    lower = prompt.lower()
+    return (
+        "p(signal=high|high)" in lower
+        and "p(signal=high|low)" in lower
+    )
+
+
+def _has_natural_language_cue_wording(prompt: str) -> bool:
+    lower = prompt.lower()
+    markers = (
+        "this result",
+        "this signal",
+        "a result like this",
+        "the chance of this signal",
+        "the chance of this result",
+        "signal rate is",
+        "signal rates:",
+        "you see this result",
+        "returned at rate",
+        "returned at probability",
+        "is seen with probability",
+        "shows up with probability",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _assert_observed_signal_semantics(
+    *,
+    gen: BayesianSignalGenerator,
+    prompt: str,
+    assumptions: dict[str, object],
+) -> None:
+    observed_signal = assumptions["observed_signal"]
+    raw_high = gen._format_number(assumptions["p_signal_high_given_high"])
+    raw_low = gen._format_number(assumptions["p_signal_high_given_low"])
+    obs_high, obs_low = gen._observed_signal_likelihood_texts(
+        p_signal_high_given_high=assumptions["p_signal_high_given_high"],
+        p_signal_high_given_low=assumptions["p_signal_high_given_low"],
+        observed_signal=observed_signal,
+    )
+    has_natural = _has_natural_language_cue_wording(prompt)
+    has_explicit = _has_explicit_high_signal_parameterization(prompt)
+
+    if observed_signal == "low" and has_natural and not has_explicit:
+        assert obs_high in prompt and obs_low in prompt, (
+            "Low-signal natural-language cue wording must use complement likelihoods "
+            f"(expected {obs_high}, {obs_low}). Prompt={prompt}"
+        )
+        raw_pair_patterns = (
+            rf"(?:probability|chance|rate|rates)[^\n]{{0,80}}{re.escape(raw_high)}"
+            rf"[^\n]{{0,80}}{re.escape(raw_low)}",
+            rf"{re.escape(raw_high)}[^\n]{{0,80}}(?:when|among|if)"
+            rf"[^\n]{{0,120}}{re.escape(raw_low)}",
+        )
+        assert not any(
+            re.search(pattern, prompt, flags=re.IGNORECASE)
+            for pattern in raw_pair_patterns
+        ), (
+            "Low-signal natural-language prompt appears to use raw high-signal likelihoods. "
+            f"Prompt={prompt}"
+        )
+
+
 def test_reliability_wording_rotation_prevents_single_phrase_dominance():
     gen = BayesianSignalGenerator(
         seed=222,
@@ -600,3 +664,336 @@ def test_bayes_bias_prompts_do_not_name_cognitive_mechanisms():
             prompt = getattr(gen, method_name)(idx).input.lower()
             for marker in forbidden:
                 assert marker not in prompt
+
+
+def test_basic_bayes_update_low_signal_hiring_screen_semantics_regression():
+    gen = BayesianSignalGenerator(
+        seed=701,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_basic_bayes_update_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = gen._render_basic_bayes_update_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="hiring_screen",
+    )
+    _assert_observed_signal_semantics(
+        gen=gen,
+        prompt=prompt,
+        assumptions=problem_spec["assumptions"],
+    )
+
+
+def test_basic_bayes_formal_low_signal_raw_values_are_explicitly_parameterized():
+    gen = BayesianSignalGenerator(
+        seed=706,
+        prompt_style="default",
+        prompt_style_regime="normative_explicit",
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_basic_bayes_update_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = gen._render_basic_bayes_update_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="normative_explicit",
+        prompt_frame_variant="hiring_screen",
+    )
+    raw_high = gen._format_number(problem_spec["assumptions"]["p_signal_high_given_high"])
+    raw_low = gen._format_number(problem_spec["assumptions"]["p_signal_high_given_low"])
+    if raw_high in prompt and raw_low in prompt:
+        assert _has_explicit_high_signal_parameterization(prompt), (
+            "If raw high-signal rates appear in low-observed-cue formal prompts, "
+            "they must be explicitly tied to P(signal=high|state). "
+            f"Prompt={prompt}"
+        )
+        assert "apply likelihoods" not in prompt.lower()
+
+
+@pytest.mark.parametrize("regime", ["neutral_realistic", "bias_eliciting"])
+def test_basic_bayes_low_signal_natural_wording_uses_complements(regime: str):
+    gen = BayesianSignalGenerator(
+        seed=707,
+        prompt_style="default",
+        prompt_style_regime=regime,
+        prompt_frame_variant="hiring_screen",
+    )
+    problem_spec = gen._build_basic_bayes_update_problem_spec(
+        prior_high=0.41,
+        p_signal_high_given_high=0.68,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+    )
+    prompt = gen._render_basic_bayes_update_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime=regime,
+        prompt_frame_variant="hiring_screen",
+    )
+    assumptions = problem_spec["assumptions"]
+    raw_high = gen._format_number(assumptions["p_signal_high_given_high"])
+    raw_low = gen._format_number(assumptions["p_signal_high_given_low"])
+    obs_high, obs_low = gen._observed_signal_likelihood_texts(
+        p_signal_high_given_high=assumptions["p_signal_high_given_high"],
+        p_signal_high_given_low=assumptions["p_signal_high_given_low"],
+        observed_signal=assumptions["observed_signal"],
+    )
+    assert gen._has_natural_language_reliability_wording(prompt=prompt)
+    assert obs_high in prompt and obs_low in prompt
+    assert not (
+        re.search(
+            rf"(?:probability|chance|rate|rates)[^\n]{{0,80}}{re.escape(raw_high)}[^\n]{{0,80}}{re.escape(raw_low)}",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+        and not _has_explicit_high_signal_parameterization(prompt)
+    ), f"Low-cue natural-language wording used raw high-signal rates. Prompt={prompt}"
+
+
+def test_has_natural_language_reliability_wording_detects_expected_phrases():
+    gen = BayesianSignalGenerator(seed=708)
+    positives = (
+        "The signal occurs with probability 0.32 when the condition is present "
+        "and 0.80 when it is absent.",
+        "This signal appears with probability 0.32 when the payment is fraudulent "
+        "and 0.80 when it is legitimate.",
+        "This signal appears with chance 0.32 when the candidate is a strong fit "
+        "and 0.80 otherwise.",
+        "This result appears with probability 0.32 when the condition is present "
+        "and 0.80 when absent.",
+    )
+    for prompt in positives:
+        assert gen._has_natural_language_reliability_wording(prompt=prompt)
+
+    explicit_only = (
+        "P(signal=high|high)=0.68, P(signal=high|low)=0.20, observed signal=low."
+    )
+    assert not gen._has_natural_language_reliability_wording(prompt=explicit_only)
+
+
+def test_qa_observed_signal_semantics_bad_good_and_explicit_paths():
+    gen = BayesianSignalGenerator(seed=709)
+    bad_prompt = (
+        "The candidate received a weak automated screen result. "
+        "This result appears with probability 0.68 when the candidate is a strong fit "
+        "and 0.20 when the candidate is not a strong fit."
+    )
+    failures_bad = gen._qa_check_observed_signal_likelihood_semantics(
+        prompt=bad_prompt,
+        observed_signal="low",
+        raw_high_text="0.68",
+        raw_low_text="0.20",
+        observed_high_text="0.32",
+        observed_low_text="0.80",
+    )
+    assert failures_bad
+    assert any(
+        failure["code"] in (
+            "low_cue_uses_raw_high_signal_rates",
+            "observed_cue_likelihood_mismatch",
+        )
+        for failure in failures_bad
+    )
+
+    good_prompt = (
+        "The candidate received a weak automated screen result. "
+        "This result appears with probability 0.32 when the candidate is a strong fit "
+        "and 0.80 when the candidate is not a strong fit."
+    )
+    failures_good = gen._qa_check_observed_signal_likelihood_semantics(
+        prompt=good_prompt,
+        observed_signal="low",
+        raw_high_text="0.68",
+        raw_low_text="0.20",
+        observed_high_text="0.32",
+        observed_low_text="0.80",
+    )
+    assert not any(
+        failure["code"] == "low_cue_uses_raw_high_signal_rates"
+        for failure in failures_good
+    )
+
+    explicit_prompt = (
+        "Use Bayes updating with P(signal=high|high)=0.68 and P(signal=high|low)=0.20; "
+        "observed signal=low."
+    )
+    failures_explicit = gen._qa_check_observed_signal_likelihood_semantics(
+        prompt=explicit_prompt,
+        observed_signal="low",
+        raw_high_text="0.68",
+        raw_low_text="0.20",
+        observed_high_text="0.32",
+        observed_low_text="0.80",
+    )
+    assert not any(
+        failure["code"] == "low_cue_uses_raw_high_signal_rates"
+        for failure in failures_explicit
+    )
+
+
+def test_binary_signal_decision_low_signal_fraud_semantics_and_payoffs_regression():
+    gen = BayesianSignalGenerator(
+        seed=702,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="fraud_detection",
+    )
+    problem_spec = gen._build_binary_signal_decision_problem_spec(
+        prior_high=0.69,
+        p_signal_high_given_high=0.81,
+        p_signal_high_given_low=0.25,
+        observed_signal="low",
+        payoff_if_high=136,
+        payoff_if_low=-26,
+        do_not_act_payoff=0,
+    )
+    prompt = gen._render_binary_signal_decision_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="fraud_detection",
+    )
+    _assert_observed_signal_semantics(
+        gen=gen,
+        prompt=prompt,
+        assumptions=problem_spec["assumptions"],
+    )
+    option_a = problem_spec["options"]["A"]
+    option_b = problem_spec["options"]["B"]
+    assert gen._format_number(option_a["payoff_if_high"]) in prompt
+    assert gen._format_number(option_a["payoff_if_low"]) in prompt
+    assert gen._format_number(option_b["payoff"]) in prompt
+
+
+def test_information_cascade_low_signal_semantics_and_history_regression():
+    gen = BayesianSignalGenerator(
+        seed=703,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="medical_screening",
+    )
+    problem_spec = gen._build_information_cascade_problem_spec(
+        prior_high=0.54,
+        p_signal_high_given_high=0.88,
+        p_signal_high_given_low=0.37,
+        observed_signal="low",
+        public_actions=["choose_low", "choose_high", "choose_high"],
+    )
+    prompt = gen._render_information_cascade_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="medical_screening",
+    )
+    history_text = gen._render_cascade_history(
+        public_actions=problem_spec["assumptions"]["public_actions"],
+        labels=gen._context_labels("medical_screening"),
+    )
+    assert history_text in prompt
+    _assert_observed_signal_semantics(
+        gen=gen,
+        prompt=prompt,
+        assumptions=problem_spec["assumptions"],
+    )
+
+
+def test_noisy_asset_neutral_prompt_is_complete_and_low_signal_semantic_regression():
+    gen = BayesianSignalGenerator(
+        seed=704,
+        prompt_style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="trading_signal",
+    )
+    problem_spec = gen._build_noisy_signal_asset_update_problem_spec(
+        prior_high=0.74,
+        p_signal_high_given_high=0.9,
+        p_signal_high_given_low=0.2,
+        observed_signal="low",
+        value_if_high=153,
+        value_if_low=111,
+        market_price=87.1,
+        transaction_cost=3.0,
+    )
+    prompt = gen._render_noisy_signal_asset_update_prompt(
+        problem_spec=problem_spec,
+        style="default",
+        prompt_style_regime="neutral_realistic",
+        prompt_frame_variant="trading_signal",
+    )
+    labels = gen._context_labels("trading_signal")
+    observed_sentence = gen._observed_signal_sentence(
+        labels=labels,
+        signal=problem_spec["assumptions"]["observed_signal"],
+    )
+    option_a = problem_spec["options"]["A"]
+    assumptions = problem_spec["assumptions"]
+    p_obs_high, p_obs_low = gen._observed_signal_likelihood_texts(
+        p_signal_high_given_high=assumptions["p_signal_high_given_high"],
+        p_signal_high_given_low=assumptions["p_signal_high_given_low"],
+        observed_signal=assumptions["observed_signal"],
+    )
+    gen._validate_noisy_signal_asset_prompt_completeness(
+        prompt=prompt,
+        prior_text=gen._format_number(assumptions["prior_high"]),
+        observed_signal=assumptions["observed_signal"],
+        observed_sentence=observed_sentence,
+        likelihood_high_text=p_obs_high,
+        likelihood_low_text=p_obs_low,
+        likelihood_high_alt_text=gen._format_number(assumptions["p_signal_high_given_high"]),
+        likelihood_low_alt_text=gen._format_number(assumptions["p_signal_high_given_low"]),
+        value_high_text=gen._format_number(option_a["value_if_high"]),
+        value_low_text=gen._format_number(option_a["value_if_low"]),
+        market_price_text=gen._format_number(option_a["market_price"]),
+        transaction_cost_text=gen._format_number(assumptions["transaction_cost"]),
+    )
+    _assert_observed_signal_semantics(
+        gen=gen,
+        prompt=prompt,
+        assumptions=problem_spec["assumptions"],
+    )
+    prior_text = gen._format_number(assumptions["prior_high"])
+    option_a = problem_spec["options"]["A"]
+    required_values = (
+        prior_text,
+        gen._format_number(option_a["value_if_high"]),
+        gen._format_number(option_a["value_if_low"]),
+        gen._format_number(option_a["market_price"]),
+        gen._format_number(assumptions["transaction_cost"]),
+    )
+    assert all(value in prompt for value in required_values)
+
+
+def test_bayes_batch_property_prompt_qa_and_low_signal_semantics_hold():
+    gen = BayesianSignalGenerator(seed=705, prompt_style="default")
+    for _ in range(100):
+        dp = gen.generate()
+        frame_variant = dp.metadata.prompt_frame_variant
+        failures = gen._qa_validate_rendered_prompt(
+            task_subtype=dp.task_subtype,
+            prompt=dp.input,
+            problem_spec=dp.problem_spec,
+            frame_variant=frame_variant,
+        )
+        assert not failures, (
+            f"Prompt QA failed for subtype={dp.task_subtype}, frame={frame_variant}: "
+            f"{failures}; prompt={dp.input}"
+        )
+        assumptions = dp.problem_spec["assumptions"]
+        if assumptions.get("observed_signal") == "low":
+            _assert_observed_signal_semantics(
+                gen=gen,
+                prompt=dp.input,
+                assumptions=assumptions,
+            )

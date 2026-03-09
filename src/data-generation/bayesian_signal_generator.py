@@ -1433,6 +1433,59 @@ class BayesianSignalGenerator(BaseGenerator):
     def _observed_signal_sentence(self, *, labels: dict[str, str], signal: str) -> str:
         return labels["observed_high"] if signal == "high" else labels["observed_low"]
 
+    def _observed_signal_likelihoods(
+        self,
+        *,
+        p_signal_high_given_high: float,
+        p_signal_high_given_low: float,
+        observed_signal: Literal["high", "low"],
+    ) -> tuple[float, float]:
+        """Return P(observed_signal|high-state), P(observed_signal|low-state)."""
+        if observed_signal == "high":
+            return p_signal_high_given_high, p_signal_high_given_low
+        return 1 - p_signal_high_given_high, 1 - p_signal_high_given_low
+
+    def _observed_signal_likelihood_texts(
+        self,
+        *,
+        p_signal_high_given_high: float,
+        p_signal_high_given_low: float,
+        observed_signal: Literal["high", "low"],
+    ) -> tuple[str, str]:
+        like_high, like_low = self._observed_signal_likelihoods(
+            p_signal_high_given_high=p_signal_high_given_high,
+            p_signal_high_given_low=p_signal_high_given_low,
+            observed_signal=observed_signal,
+        )
+        return self._format_number(like_high), self._format_number(like_low)
+
+    def _signal_likelihood_text_context(
+        self,
+        *,
+        assumptions: dict[str, object],
+    ) -> dict[str, str | float]:
+        """Centralize raw/observed cue likelihood values and formatted texts."""
+        observed_signal_raw = assumptions.get("observed_signal")
+        observed_signal: Literal["high", "low"] = (
+            observed_signal_raw if observed_signal_raw in {"high", "low"} else "high"
+        )
+        raw_high = float(assumptions["p_signal_high_given_high"])
+        raw_low = float(assumptions["p_signal_high_given_low"])
+        observed_high, observed_low = self._observed_signal_likelihoods(
+            p_signal_high_given_high=raw_high,
+            p_signal_high_given_low=raw_low,
+            observed_signal=observed_signal,
+        )
+        return {
+            "observed_signal": observed_signal,
+            "raw_high": raw_high,
+            "raw_low": raw_low,
+            "raw_high_text": self._format_number(raw_high),
+            "raw_low_text": self._format_number(raw_low),
+            "observed_high_text": self._format_number(observed_high),
+            "observed_low_text": self._format_number(observed_low),
+        }
+
     def _binary_prompt_has_observed_signal(
         self,
         *,
@@ -1466,6 +1519,8 @@ class BayesianSignalGenerator(BaseGenerator):
         observed_sentence: str,
         likelihood_high_text: str,
         likelihood_low_text: str,
+        likelihood_high_alt_text: str | None = None,
+        likelihood_low_alt_text: str | None = None,
         payoff_high_text: str,
         payoff_low_text: str,
         do_not_act_payoff_text: str,
@@ -1473,13 +1528,36 @@ class BayesianSignalGenerator(BaseGenerator):
         """Ensure the rendered prompt contains all decision-relevant visible inputs."""
         lower = prompt.lower()
         missing: list[str] = []
+        if observed_signal == "low":
+            # Backward-compatible default: if callers provide only raw
+            # P(signal=high|state) texts, also accept the observed-cue complements.
+            if likelihood_high_alt_text is None:
+                try:
+                    likelihood_high_alt_text = self._format_number(
+                        1 - float(likelihood_high_text)
+                    )
+                except (TypeError, ValueError):
+                    likelihood_high_alt_text = None
+            if likelihood_low_alt_text is None:
+                try:
+                    likelihood_low_alt_text = self._format_number(
+                        1 - float(likelihood_low_text)
+                    )
+                except (TypeError, ValueError):
+                    likelihood_low_alt_text = None
         if prior_text not in prompt:
             missing.append("prior/base_rate")
         if not self._binary_prompt_has_observed_signal(
             prompt=prompt, signal=observed_signal, observed_sentence=observed_sentence
         ):
             missing.append("observed_signal")
-        if likelihood_high_text not in prompt or likelihood_low_text not in prompt:
+        has_high_like = likelihood_high_text in prompt or (
+            likelihood_high_alt_text is not None and likelihood_high_alt_text in prompt
+        )
+        has_low_like = likelihood_low_text in prompt or (
+            likelihood_low_alt_text is not None and likelihood_low_alt_text in prompt
+        )
+        if not (has_high_like and has_low_like):
             missing.append("likelihood_pair")
         if (
             payoff_high_text not in prompt
@@ -1492,6 +1570,191 @@ class BayesianSignalGenerator(BaseGenerator):
                 "binary_signal_decision prompt missing required elements: "
                 f"{', '.join(missing)}. Prompt='{lower}'"
             )
+
+    def _validate_information_cascade_prompt_completeness(
+        self,
+        *,
+        prompt: str,
+        prior_text: str,
+        public_history_text: str,
+        observed_signal: str,
+        observed_sentence: str,
+        likelihood_high_text: str,
+        likelihood_low_text: str,
+        likelihood_high_alt_text: str | None = None,
+        likelihood_low_alt_text: str | None = None,
+    ) -> None:
+        lower = prompt.lower()
+        missing: list[str] = []
+        if prior_text not in prompt:
+            missing.append("prior/base_rate")
+        if public_history_text not in prompt:
+            missing.append("public_history")
+        if not self._binary_prompt_has_observed_signal(
+            prompt=prompt, signal=observed_signal, observed_sentence=observed_sentence
+        ):
+            missing.append("private_observed_signal")
+        has_high_like = likelihood_high_text in prompt or (
+            likelihood_high_alt_text is not None and likelihood_high_alt_text in prompt
+        )
+        has_low_like = likelihood_low_text in prompt or (
+            likelihood_low_alt_text is not None and likelihood_low_alt_text in prompt
+        )
+        if not (has_high_like and has_low_like):
+            missing.append("signal_likelihood_pair")
+        if missing:
+            raise ValueError(
+                "information_cascade_step prompt missing required elements: "
+                f"{', '.join(missing)}. Prompt='{lower}'"
+            )
+
+    def _validate_noisy_signal_asset_prompt_completeness(
+        self,
+        *,
+        prompt: str,
+        prior_text: str,
+        observed_signal: str,
+        observed_sentence: str,
+        likelihood_high_text: str,
+        likelihood_low_text: str,
+        likelihood_high_alt_text: str | None = None,
+        likelihood_low_alt_text: str | None = None,
+        value_high_text: str,
+        value_low_text: str,
+        market_price_text: str,
+        transaction_cost_text: str,
+    ) -> None:
+        lower = prompt.lower()
+        missing: list[str] = []
+        if prior_text not in prompt:
+            missing.append("prior/base_rate")
+        if not self._binary_prompt_has_observed_signal(
+            prompt=prompt, signal=observed_signal, observed_sentence=observed_sentence
+        ):
+            missing.append("observed_signal")
+        has_high_like = likelihood_high_text in prompt or (
+            likelihood_high_alt_text is not None and likelihood_high_alt_text in prompt
+        )
+        has_low_like = likelihood_low_text in prompt or (
+            likelihood_low_alt_text is not None and likelihood_low_alt_text in prompt
+        )
+        if not (has_high_like and has_low_like):
+            missing.append("signal_likelihood_pair")
+        if value_high_text not in prompt or value_low_text not in prompt:
+            missing.append("high_low_values")
+        if market_price_text not in prompt:
+            missing.append("market_price")
+        if transaction_cost_text not in prompt:
+            missing.append("transaction_cost")
+        if missing:
+            raise ValueError(
+                "noisy_signal_asset_update prompt missing required elements: "
+                f"{', '.join(missing)}. Prompt='{lower}'"
+            )
+
+    def _is_explicit_high_signal_parameterization(
+        self,
+        *,
+        prompt: str,
+        raw_high_text: str,
+        raw_low_text: str,
+    ) -> bool:
+        lower = prompt.lower()
+        explicit_tokens = (
+            "p(signal=high|high)",
+            "p(signal=high|low)",
+            "signal model: p(signal=high|high)",
+        )
+        if not any(token in lower for token in explicit_tokens):
+            return False
+        return raw_high_text in prompt and raw_low_text in prompt
+
+    def _has_natural_language_reliability_wording(self, *, prompt: str) -> bool:
+        """Detect observed-cue reliability prose used in renderer templates.
+
+        This helper gates semantic QA that enforces observed-cue likelihoods
+        (including low-signal complements). It intentionally keys on
+        natural-language reliability phrases, not generic "signal" mentions, so
+        explicit parameterization-only prompts like P(signal=high|...) are
+        handled separately.
+        """
+        lower = prompt.lower()
+        markers = (
+            "this result",
+            "this signal",
+            "a result like this",
+            "the signal occurs with probability",
+            "the signal appears with probability",
+            "this signal appears with probability",
+            "this signal appears with chance",
+            "this result appears with probability",
+            "chance of this signal",
+            "chance of this result",
+            "the chance of this signal",
+            "the chance of this result",
+            "signal rate is",
+            "signal rates:",
+            "you see this result",
+            "returned at rate",
+            "returned at probability",
+        )
+        return any(marker in lower for marker in markers)
+
+    def _qa_check_observed_signal_likelihood_semantics(
+        self,
+        *,
+        prompt: str,
+        observed_signal: str,
+        raw_high_text: str,
+        raw_low_text: str,
+        observed_high_text: str,
+        observed_low_text: str,
+    ) -> list[dict[str, str]]:
+        failures: list[dict[str, str]] = []
+        explicit_high_param = self._is_explicit_high_signal_parameterization(
+            prompt=prompt,
+            raw_high_text=raw_high_text,
+            raw_low_text=raw_low_text,
+        )
+        has_natural = self._has_natural_language_reliability_wording(prompt=prompt)
+        if not has_natural:
+            return failures
+
+        if observed_high_text not in prompt or observed_low_text not in prompt:
+            failures.append(
+                self._prompt_qa_failure(
+                    code="observed_cue_likelihood_mismatch",
+                    detail=(
+                        "Natural-language cue wording must use likelihoods of the observed cue "
+                        "(including complements when observed signal is low)."
+                    ),
+                )
+            )
+            return failures
+
+        if observed_signal == "low" and not explicit_high_param:
+            raw_high = re.escape(raw_high_text)
+            raw_low = re.escape(raw_low_text)
+            # [^\n] means "any character except newline"; [^\\n] would
+            # incorrectly mean "any character except backslash or 'n'".
+            raw_pair_patterns = (
+                rf"(?:probability|chance|rate|rates)[^\n]{{0,80}}{raw_high}[^\n]{{0,80}}{raw_low}",
+                rf"{raw_high}[^\n]{{0,80}}(?:when|among|if)[^\n]{{0,120}}{raw_low}",
+            )
+            if any(
+                re.search(pattern, prompt, flags=re.IGNORECASE)
+                for pattern in raw_pair_patterns
+            ):
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="low_cue_uses_raw_high_signal_rates",
+                        detail=(
+                            "Observed low-cue natural-language wording includes raw "
+                            "P(signal=high|state) rates instead of low-cue complements."
+                        ),
+                    )
+                )
+        return failures
 
     def _explicit_reliability_clause(
         self,
@@ -1521,7 +1784,7 @@ class BayesianSignalGenerator(BaseGenerator):
                 ),
                 (
                     "formal_conditional_statement",
-                    "The conditional signal probability is {p_high} {when_high} and "
+                    "The probability of the observed signal is {p_high} {when_high} and "
                     "{p_low} {when_low}.",
                 ),
                 (
@@ -1774,16 +2037,17 @@ class BayesianSignalGenerator(BaseGenerator):
         lower_prompt = prompt.lower()
         assumptions = problem_spec["assumptions"]
         labels = self._context_labels(frame_variant)
-        observed_signal = assumptions.get("observed_signal")
-        if observed_signal not in {"high", "low"}:
-            observed_signal = "high"
+        like_ctx = self._signal_likelihood_text_context(assumptions=assumptions)
+        observed_signal = like_ctx["observed_signal"]
         observed_sentence = self._observed_signal_sentence(
             labels=labels,
             signal=observed_signal,
         )
         prior_text = self._format_number(float(assumptions["prior_high"]))
-        p_high_text = self._format_number(float(assumptions["p_signal_high_given_high"]))
-        p_low_text = self._format_number(float(assumptions["p_signal_high_given_low"]))
+        p_high_text = like_ctx["raw_high_text"]
+        p_low_text = like_ctx["raw_low_text"]
+        p_obs_high_text = like_ctx["observed_high_text"]
+        p_obs_low_text = like_ctx["observed_low_text"]
         when_high = self._state_phrase(labels=labels, state="high", mode="when")
         when_low = self._state_phrase(labels=labels, state="low", mode="when")
         among_high = self._state_phrase(labels=labels, state="high", mode="among")
@@ -1808,11 +2072,18 @@ class BayesianSignalGenerator(BaseGenerator):
                         detail="Observed cue/signal not found in rendered prompt.",
                     )
                 )
-            if p_high_text not in prompt or p_low_text not in prompt:
+            allowed_high_texts = {p_high_text, p_obs_high_text}
+            allowed_low_texts = {p_low_text, p_obs_low_text}
+            has_high_rate = any(text in prompt for text in allowed_high_texts)
+            has_low_rate = any(text in prompt for text in allowed_low_texts)
+            if not has_high_rate or not has_low_rate:
                 failures.append(
                     self._prompt_qa_failure(
                         code="missing_cue_rate_pair",
-                        detail="One or both conditional cue rates are missing.",
+                        detail=(
+                            "One or both conditional cue rates are missing "
+                            "(raw high-signal or observed-cue equivalents)."
+                        ),
                     )
                 )
             has_when_pair = (
@@ -1848,6 +2119,16 @@ class BayesianSignalGenerator(BaseGenerator):
                         detail=str(exc),
                     )
                 )
+            failures.extend(
+                self._qa_check_observed_signal_likelihood_semantics(
+                    prompt=prompt,
+                    observed_signal=observed_signal,
+                    raw_high_text=p_high_text,
+                    raw_low_text=p_low_text,
+                    observed_high_text=p_obs_high_text,
+                    observed_low_text=p_obs_low_text,
+                )
+            )
 
         if task_subtype == "binary_signal_decision":
             option_a = problem_spec["options"]["A"]
@@ -1895,6 +2176,77 @@ class BayesianSignalGenerator(BaseGenerator):
                         ),
                     )
                 )
+        if task_subtype == "information_cascade_step":
+            public_actions = assumptions.get("public_actions", [])
+            history_text = self._render_cascade_history(
+                public_actions=public_actions,
+                labels=labels,
+            )
+            try:
+                self._validate_information_cascade_prompt_completeness(
+                    prompt=prompt,
+                    prior_text=prior_text,
+                    public_history_text=history_text,
+                    observed_signal=observed_signal,
+                    observed_sentence=observed_sentence,
+                    likelihood_high_text=p_obs_high_text,
+                    likelihood_low_text=p_obs_low_text,
+                    likelihood_high_alt_text=p_high_text,
+                    likelihood_low_alt_text=p_low_text,
+                )
+            except ValueError as exc:
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="cascade_prompt_incomplete",
+                        detail=str(exc),
+                    )
+                )
+            failures.extend(
+                self._qa_check_observed_signal_likelihood_semantics(
+                    prompt=prompt,
+                    observed_signal=observed_signal,
+                    raw_high_text=p_high_text,
+                    raw_low_text=p_low_text,
+                    observed_high_text=p_obs_high_text,
+                    observed_low_text=p_obs_low_text,
+                )
+            )
+        if task_subtype == "noisy_signal_asset_update":
+            option_a = problem_spec["options"]["A"]
+            try:
+                self._validate_noisy_signal_asset_prompt_completeness(
+                    prompt=prompt,
+                    prior_text=prior_text,
+                    observed_signal=observed_signal,
+                    observed_sentence=observed_sentence,
+                    likelihood_high_text=p_obs_high_text,
+                    likelihood_low_text=p_obs_low_text,
+                    likelihood_high_alt_text=p_high_text,
+                    likelihood_low_alt_text=p_low_text,
+                    value_high_text=self._format_number(float(option_a["value_if_high"])),
+                    value_low_text=self._format_number(float(option_a["value_if_low"])),
+                    market_price_text=self._format_number(float(option_a["market_price"])),
+                    transaction_cost_text=self._format_number(
+                        float(assumptions.get("transaction_cost", 0.0))
+                    ),
+                )
+            except ValueError as exc:
+                failures.append(
+                    self._prompt_qa_failure(
+                        code="asset_prompt_incomplete",
+                        detail=str(exc),
+                    )
+                )
+            failures.extend(
+                self._qa_check_observed_signal_likelihood_semantics(
+                    prompt=prompt,
+                    observed_signal=observed_signal,
+                    raw_high_text=p_high_text,
+                    raw_low_text=p_low_text,
+                    observed_high_text=p_obs_high_text,
+                    observed_low_text=p_obs_low_text,
+                )
+            )
         return failures
 
     def _state_phrase(
@@ -1934,9 +2286,12 @@ class BayesianSignalGenerator(BaseGenerator):
     ) -> str:
         assumptions = problem_spec["assumptions"]
         prior = self._format_number(assumptions["prior_high"])
-        p_sh_h = self._format_number(assumptions["p_signal_high_given_high"])
-        p_sh_l = self._format_number(assumptions["p_signal_high_given_low"])
-        signal = assumptions["observed_signal"]
+        like_ctx = self._signal_likelihood_text_context(assumptions=assumptions)
+        p_sh_h = like_ctx["raw_high_text"]
+        p_sh_l = like_ctx["raw_low_text"]
+        signal = like_ctx["observed_signal"]
+        p_obs_h = like_ctx["observed_high_text"]
+        p_obs_l = like_ctx["observed_low_text"]
         context = prompt_frame_variant or "medical_screening"
         labels = self._context_labels(context)
         observed_sentence = self._observed_signal_sentence(labels=labels, signal=signal)
@@ -1956,8 +2311,8 @@ class BayesianSignalGenerator(BaseGenerator):
             frame_variant=context,
             tier=tier,
             problem_spec=problem_spec,
-            p_high_text=p_sh_h,
-            p_low_text=p_sh_l,
+            p_high_text=p_obs_h,
+            p_low_text=p_obs_l,
             state_high=labels["high_short"],
             state_low=labels["low_short"],
         ).rstrip(".")
@@ -1994,7 +2349,8 @@ class BayesianSignalGenerator(BaseGenerator):
                 ),
                 (
                     f"Evaluate posterior choice ({context}): start from prior={prior}, "
-                    f"apply likelihoods {p_sh_h} and {p_sh_l}, and condition on "
+                    f"apply P(signal=high|high)={p_sh_h} and P(signal=high|low)={p_sh_l}, "
+                    "then condition on "
                     f"observed signal={signal}. Select the higher-probability state."
                 ),
                 (
@@ -2029,43 +2385,43 @@ class BayesianSignalGenerator(BaseGenerator):
                     f"In this {labels['entity']}, {observed_sentence.lower()} "
                     f"About {prior} of cases are "
                     f"ones where {labels['high_short']}. This result appears with probability "
-                    f"{p_sh_h} {when_high} and {p_sh_l} {when_low}. "
+                    f"{p_obs_h} {when_high} and {p_obs_l} {when_low}. "
                     "Which state now seems more likely?"
                 ),
                 (
                     f"{observed_sentence} {prevalence_text} "
-                    f"The chance of this result is {p_sh_h} {when_high} and "
-                    f"{p_sh_l} {when_low}. Which state should you treat as likelier?"
+                    f"The chance of this result is {p_obs_h} {when_high} and "
+                    f"{p_obs_l} {when_low}. Which state should you treat as likelier?"
                 ),
                 (
                     f"{observed_sentence} The signal occurs with probability "
-                    f"{p_sh_h} {when_high} and {p_sh_l} {when_low}. "
+                    f"{p_obs_h} {when_high} and {p_obs_l} {when_low}. "
                     f"{prevalence_text} Deciding now, which state should you select?"
                 ),
                 (
                     f"Case review: about {prior} of these {labels['entity']} cases are ones where "
                     f"{labels['high_short']}. {observed_sentence} "
-                    f"You see this result with probability {p_sh_h} {among_high} and "
-                    f"{p_sh_l} {among_low}. Which state now looks likelier?"
+                    f"You see this result with probability {p_obs_h} {among_high} and "
+                    f"{p_obs_l} {among_low}. Which state now looks likelier?"
                 ),
                 (
                     f"Deciding now on this {labels['entity']} case: the base rate is {prior} "
                     f"for {labels['high_short']}, and {observed_sentence.lower()} "
-                    f"(probability {p_sh_h} {when_high}; {p_sh_l} {when_low}), "
+                    f"(probability {p_obs_h} {when_high}; {p_obs_l} {when_low}), "
                     "which state is more likely?"
                 ),
                 (
                     f"Start from what you received: {observed_sentence} "
                     f"Among cases where {labels['high_short']}, "
-                    f"this result is returned at {p_sh_h}; "
-                    f"among the alternative cases, it is returned at {p_sh_l}. "
+                    f"this result is returned at {p_obs_h}; "
+                    f"among the alternative cases, it is returned at {p_obs_l}. "
                     f"The background share is {prior} across all cases. "
                     "Which state is the stronger current read?"
                 ),
                 (
                     f"{observed_sentence} {prevalence_text} "
-                    f"This result is returned at rate {p_sh_h} "
-                    f"{when_high} and {p_sh_l} {when_low}. "
+                    f"This result is returned at rate {p_obs_h} "
+                    f"{when_high} and {p_obs_l} {when_low}. "
                     "Which state should you mark as more likely?"
                 ),
             ]
@@ -2140,8 +2496,8 @@ class BayesianSignalGenerator(BaseGenerator):
             self._validate_bayes_bias_wording(prompt=body)
         body = self._normalize_reliability_wording(
             prompt=body,
-            p_high_text=p_sh_h,
-            p_low_text=p_sh_l,
+            p_high_text=p_obs_h,
+            p_low_text=p_obs_l,
             state_high=labels["high_short"],
             state_low=labels["low_short"],
         )
@@ -2166,9 +2522,12 @@ class BayesianSignalGenerator(BaseGenerator):
         option_a = problem_spec["options"]["A"]
         option_b = problem_spec["options"]["B"]
         prior = self._format_number(assumptions["prior_high"])
-        p_sh_h = self._format_number(assumptions["p_signal_high_given_high"])
-        p_sh_l = self._format_number(assumptions["p_signal_high_given_low"])
-        signal = assumptions["observed_signal"]
+        like_ctx = self._signal_likelihood_text_context(assumptions=assumptions)
+        p_sh_h = like_ctx["raw_high_text"]
+        p_sh_l = like_ctx["raw_low_text"]
+        signal = like_ctx["observed_signal"]
+        p_obs_h = like_ctx["observed_high_text"]
+        p_obs_l = like_ctx["observed_low_text"]
         context = prompt_frame_variant or "medical_screening"
         labels = self._context_labels(context)
         observed_sentence = self._observed_signal_sentence(labels=labels, signal=signal)
@@ -2205,25 +2564,25 @@ class BayesianSignalGenerator(BaseGenerator):
         tier = self._prompt_style_tier(style, resolved_regime)
         reliability_templates = [
             (
-                f"This signal is seen with probability {p_sh_h} {among_high} "
-                f"and {p_sh_l} {among_low}."
+                f"This signal is seen with probability {p_obs_h} {among_high} "
+                f"and {p_obs_l} {among_low}."
             ),
             (
-                f"The signal occurs with probability {p_sh_h} {among_high} "
-                f"and {p_sh_l} {among_low}."
+                f"The signal occurs with probability {p_obs_h} {among_high} "
+                f"and {p_obs_l} {among_low}."
             ),
             (
-                f"A result like this shows up with probability {p_sh_h} {among_high} "
-                f"and {p_sh_l} {among_low}."
+                f"A result like this shows up with probability {p_obs_h} {among_high} "
+                f"and {p_obs_l} {among_low}."
             ),
-            f"The chance of this signal is {p_sh_h} {among_high} and {p_sh_l} {among_low}.",
+            f"The chance of this signal is {p_obs_h} {among_high} and {p_obs_l} {among_low}.",
             (
-                f"This result is returned at probability {p_sh_h} {among_high} "
-                f"and {p_sh_l} {among_low}."
+                f"This result is returned at probability {p_obs_h} {among_high} "
+                f"and {p_obs_l} {among_low}."
             ),
             (
-                f"The rate for this signal is {p_sh_h} {among_high} "
-                f"and {p_sh_l} {among_low}."
+                f"The rate for this signal is {p_obs_h} {among_high} "
+                f"and {p_obs_l} {among_low}."
             ),
         ]
         reliability_idx = self._select_template_variant(
@@ -2360,8 +2719,8 @@ class BayesianSignalGenerator(BaseGenerator):
             self._validate_bayes_bias_wording(prompt=body)
         body = self._normalize_reliability_wording(
             prompt=body,
-            p_high_text=p_sh_h,
-            p_low_text=p_sh_l,
+            p_high_text=p_obs_h,
+            p_low_text=p_obs_l,
             state_high=labels["high_short"],
             state_low=labels["low_short"],
         )
@@ -2377,8 +2736,10 @@ class BayesianSignalGenerator(BaseGenerator):
                 prior_text=prior,
                 observed_signal=signal,
                 observed_sentence=observed_sentence,
-                likelihood_high_text=p_sh_h,
-                likelihood_low_text=p_sh_l,
+                likelihood_high_text=p_obs_h,
+                likelihood_low_text=p_obs_l,
+                likelihood_high_alt_text=p_sh_h,
+                likelihood_low_alt_text=p_sh_l,
                 payoff_high_text=payoff_high,
                 payoff_low_text=payoff_low,
                 do_not_act_payoff_text=wait_payoff,
@@ -2390,8 +2751,10 @@ class BayesianSignalGenerator(BaseGenerator):
             prior_text=prior,
             observed_signal=signal,
             observed_sentence=observed_sentence,
-            likelihood_high_text=p_sh_h,
-            likelihood_low_text=p_sh_l,
+            likelihood_high_text=p_obs_h,
+            likelihood_low_text=p_obs_l,
+            likelihood_high_alt_text=p_sh_h,
+            likelihood_low_alt_text=p_sh_l,
             payoff_high_text=payoff_high,
             payoff_low_text=payoff_low,
             do_not_act_payoff_text=wait_payoff,
@@ -2408,9 +2771,12 @@ class BayesianSignalGenerator(BaseGenerator):
     ) -> str:
         assumptions = problem_spec["assumptions"]
         prior = self._format_number(assumptions["prior_high"])
-        p_sh_h = self._format_number(assumptions["p_signal_high_given_high"])
-        p_sh_l = self._format_number(assumptions["p_signal_high_given_low"])
-        signal = assumptions["observed_signal"]
+        like_ctx = self._signal_likelihood_text_context(assumptions=assumptions)
+        p_sh_h = like_ctx["raw_high_text"]
+        p_sh_l = like_ctx["raw_low_text"]
+        signal = like_ctx["observed_signal"]
+        p_obs_h = like_ctx["observed_high_text"]
+        p_obs_l = like_ctx["observed_low_text"]
         context = prompt_frame_variant or "medical_screening"
         labels = self._context_labels(context)
         when_high = self._state_phrase(labels=labels, state="high", mode="when")
@@ -2435,14 +2801,14 @@ class BayesianSignalGenerator(BaseGenerator):
             body = (
                 f"In this {labels['entity']}, earlier calls were: {history_text}. "
                 f"{observed_sentence} "
-                f"The signal rate is {p_sh_h} {when_high} and {p_sh_l} "
+                f"The signal rate is {p_obs_h} {when_high} and {p_obs_l} "
                 f"{when_low} (baseline {prior}). "
                 "Which state seems more likely now?"
             )
         else:
             body = (
                 f"Recent calls are noticeable: {history_text}. {observed_sentence} "
-                f"(Signal rates: {p_sh_h} {when_high}, {p_sh_l} "
+                f"(Signal rates: {p_obs_h} {when_high}, {p_obs_l} "
                 f"{when_low}; baseline {prior}.) "
                 "Which state would you choose?"
             )
@@ -2462,9 +2828,12 @@ class BayesianSignalGenerator(BaseGenerator):
         assumptions = problem_spec["assumptions"]
         option_a = problem_spec["options"]["A"]
         prior = self._format_number(assumptions["prior_high"])
-        p_sh_h = self._format_number(assumptions["p_signal_high_given_high"])
-        p_sh_l = self._format_number(assumptions["p_signal_high_given_low"])
-        signal = assumptions["observed_signal"]
+        like_ctx = self._signal_likelihood_text_context(assumptions=assumptions)
+        p_sh_h = like_ctx["raw_high_text"]
+        p_sh_l = like_ctx["raw_low_text"]
+        signal = like_ctx["observed_signal"]
+        p_obs_h = like_ctx["observed_high_text"]
+        p_obs_l = like_ctx["observed_low_text"]
         context = prompt_frame_variant or "medical_screening"
         labels = self._context_labels(context)
         observed_sentence = self._observed_signal_sentence(labels=labels, signal=signal)
@@ -2493,6 +2862,8 @@ class BayesianSignalGenerator(BaseGenerator):
                 f"You can buy a contingent contract tied to this {labels['entity']}. "
                 f"Baseline chance that {labels['high_short']} is {prior}. "
                 f"{observed_sentence} "
+                f"This signal is seen with probability {p_obs_h} {when_high} and "
+                f"{p_obs_l} {when_low}. "
                 f"If high, contract value is {value_high}; if low, value is {value_low}. "
                 f"Price is {market_price} and transaction cost is {transaction_cost}. "
                 "Should you buy?"
@@ -2500,8 +2871,8 @@ class BayesianSignalGenerator(BaseGenerator):
         else:
             body = (
                 f"{observed_sentence} "
-                f"This signal appears with chance {p_sh_h} {when_high} and "
-                f"{p_sh_l} {when_low}. "
+                f"This signal appears with chance {p_obs_h} {when_high} and "
+                f"{p_obs_l} {when_low}. "
                 f"The contract pays {value_high} in high and {value_low} in low; "
                 f"entry price {market_price}, transaction cost {transaction_cost}. "
                 f"(Baseline rate: {prior}.) Buy?"
